@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { PickedWordPair, WordPair, createWordPairKey, getRandomWordPair } from '../game/words';
 import { logger } from '../logger';
 import { AIContext, SeatNumber, VoteTarget } from '../types';
 
@@ -179,6 +180,10 @@ function validateSpeechJson(input: unknown): string | null {
   return normalized || null;
 }
 
+function normalizeSpeechText(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget | null {
   if (!input || typeof input !== 'object') {
     return null;
@@ -200,6 +205,33 @@ function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget 
   return null;
 }
 
+function sanitizeGameWord(raw: string): string {
+  return raw.trim().replace(/\s+/g, '').replace(/[，。！？、,.!?:：；;"'“”‘’`]/g, '').slice(0, 8);
+}
+
+function validateWordPairJson(input: unknown): WordPair | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const civilianRaw = (input as { civilian?: unknown }).civilian;
+  const undercoverRaw = (input as { undercover?: unknown }).undercover;
+  if (typeof civilianRaw !== 'string' || typeof undercoverRaw !== 'string') {
+    return null;
+  }
+
+  const civilian = sanitizeGameWord(civilianRaw);
+  const undercover = sanitizeGameWord(undercoverRaw);
+  if (!civilian || !undercover) {
+    return null;
+  }
+  if (civilian === undercover) {
+    return null;
+  }
+
+  return { civilian, undercover };
+}
+
 const fallbackCivilianSpeech = [
   '它常见但别太直白，我先装糊涂。',
   '这词不难猜，但我先给点烟雾弹。',
@@ -216,6 +248,22 @@ const fallbackUndercoverSpeech = [
   '请相信我的胡说八道有理有据。'
 ];
 
+const diversifiedCivilianSpeech = [
+  '我给个生活线索，但先不点破。',
+  '它挺常见，我先说一半藏一半。',
+  '这词有画面感，我先打个马虎眼。',
+  '先给模糊方向，细节暂时保留。',
+  '我先绕着说，别急着对号入座。'
+];
+
+const diversifiedUndercoverSpeech = [
+  '我先贴边描述，稳一点再说。',
+  '这轮先走中间位，别太上头。',
+  '我先给安全线索，不把话说满。',
+  '先顺着大家思路，再慢慢观察。',
+  '这句先求稳，信息别给太死。'
+];
+
 export class AIClient {
   private readonly adapter: ModelAdapter | null;
   private readonly semaphore: Semaphore;
@@ -224,6 +272,51 @@ export class AIClient {
   constructor() {
     this.semaphore = new Semaphore(config.maxAIConcurrent);
     this.adapter = this.buildAdapter();
+  }
+
+  async generateWordPair(lastKey?: string): Promise<PickedWordPair> {
+    const useGeneratedPair = Boolean(this.adapter) && Math.random() < 0.5;
+    if (!useGeneratedPair || !this.adapter) {
+      if (!this.adapter) {
+        this.logDisabledOnce();
+      }
+      return getRandomWordPair(lastKey);
+    }
+
+    return this.semaphore.use(async () => {
+      try {
+        const content = await this.adapter!.chat([
+          {
+            role: 'system',
+            content:
+              '你要给“谁是卧底”出一组有趣词对。要求：1) 两个词同一语义领域且易混淆；2) 日常常见，避免生僻；3) 不要完全同义；4) 每个词2~6字最佳。只输出 JSON，不要解释或 markdown。JSON schema: {"civilian":"平民词","undercover":"卧底词"}。'
+          },
+          {
+            role: 'user',
+            content: [
+              '请生成一组中文词对，风格轻松有趣，适合多人推理博弈。',
+              lastKey ? `上一局词对: ${lastKey.replace('|', ' / ')}，请避免重复。` : '这是本房间首局，可自由发挥。'
+            ].join('\n')
+          }
+        ]);
+
+        const parsed = extractJsonObject(content);
+        const pair = validateWordPairJson(parsed);
+        if (!pair) {
+          throw new Error('AI word pair JSON schema validation failed');
+        }
+
+        const key = createWordPairKey(pair);
+        if (lastKey && key === lastKey) {
+          throw new Error('AI generated duplicate word pair with last round');
+        }
+
+        return { pair, key };
+      } catch (error) {
+        logger.warn({ err: error }, 'AI word pair failed, fallback to built-in library');
+        return getRandomWordPair(lastKey);
+      }
+    });
   }
 
   async generateSpeech(context: AIContext): Promise<string> {
@@ -252,10 +345,10 @@ export class AIClient {
           throw new Error('AI speech JSON schema validation failed');
         }
 
-        return speech;
+        return this.ensureDistinctSpeech(speech, context);
       } catch (error) {
         logger.warn({ err: error }, 'AI speech failed, fallback applied');
-        return this.fallbackSpeech(context);
+        return this.ensureDistinctSpeech(this.fallbackSpeech(context), context);
       }
     });
   }
@@ -318,7 +411,7 @@ export class AIClient {
       `当前轮次: ${context.round}`,
       `存活座位: ${context.aliveSeats.join(', ')}`,
       speechLog ? `本轮已有发言:\n${speechLog}` : '你是本轮首个发言',
-      '请给出一句不超过30字的发言：要贴合词义、略带误导、稍微幽默。'
+      '请给出一句不超过30字的发言：要贴合词义、略带误导、稍微幽默，且不要复述本轮已有原句。'
     ].join('\n');
   }
 
@@ -341,6 +434,55 @@ export class AIClient {
   private fallbackSpeech(context: AIContext): string {
     const list = context.myRole === 'civilian' ? fallbackCivilianSpeech : fallbackUndercoverSpeech;
     return list[Math.floor(Math.random() * list.length)];
+  }
+
+  private ensureDistinctSpeech(speech: string, context: AIContext): string {
+    const used = this.collectUsedSpeechKeys(context);
+    const normalized = speech.trim().replace(/\s+/g, ' ').slice(0, 30);
+    if (!normalized) {
+      return this.buildEmergencySpeech(context);
+    }
+    if (!used.has(normalizeSpeechText(normalized))) {
+      return normalized;
+    }
+
+    for (const candidate of this.buildSpeechCandidates(context)) {
+      const key = normalizeSpeechText(candidate);
+      if (!used.has(key)) {
+        return candidate;
+      }
+    }
+
+    return this.buildEmergencySpeech(context);
+  }
+
+  private collectUsedSpeechKeys(context: AIContext): Set<string> {
+    const used = new Set<string>();
+    for (const item of context.speeches) {
+      if (item.round === context.round || item.seat === context.mySeat) {
+        used.add(normalizeSpeechText(item.text));
+      }
+    }
+    return used;
+  }
+
+  private buildSpeechCandidates(context: AIContext): string[] {
+    const roleSpecific = context.myRole === 'civilian' ? diversifiedCivilianSpeech : diversifiedUndercoverSpeech;
+    const roleFallback = context.myRole === 'civilian' ? fallbackCivilianSpeech : fallbackUndercoverSpeech;
+    const candidates = [...roleSpecific, ...roleFallback]
+      .map((item) => item.trim().replace(/\s+/g, ' ').slice(0, 30))
+      .filter((item) => item.length > 0);
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    const offset = (context.round * 31 + context.mySeat * 17) % candidates.length;
+    return [...candidates.slice(offset), ...candidates.slice(0, offset)];
+  }
+
+  private buildEmergencySpeech(context: AIContext): string {
+    return `第${context.round}轮${context.mySeat}号先给模糊线索`;
   }
 
   private fallbackVote(context: AIContext): VoteTarget {

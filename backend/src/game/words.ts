@@ -45,16 +45,16 @@ export const wordPairs: WordPair[] = [
   { civilian: '筷子', undercover: '叉子' }
 ];
 
-function toPairKey(pair: WordPair): string {
+export function createWordPairKey(pair: WordPair): string {
   return `${pair.civilian}|${pair.undercover}`;
 }
 
 export function getRandomWordPair(lastKey?: string): PickedWordPair {
-  const candidates = lastKey ? wordPairs.filter((pair) => toPairKey(pair) !== lastKey) : wordPairs;
+  const candidates = lastKey ? wordPairs.filter((pair) => createWordPairKey(pair) !== lastKey) : wordPairs;
   const pool = candidates.length > 0 ? candidates : wordPairs;
   const pair = pool[Math.floor(Math.random() * pool.length)];
   return {
     pair,
-    key: toPairKey(pair)
+    key: createWordPairKey(pair)
   };
 }

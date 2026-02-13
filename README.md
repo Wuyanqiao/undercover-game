@@ -8,11 +8,13 @@
 
 - 房主可设置 4~12 座位，真人不足自动补 AI
 - 房主可锁房/开房，锁房后禁止新玩家加入
+- 每局词语随机来源：内置题库或 DeepSeek 现场出题
 - 无登录系统，游客昵称即可进入
 - 最多同时 3 个活跃房间
 - Redis 存储房间状态、限流与重连令牌
 - Fastify + Socket.IO 实时同步发言/投票/淘汰/结算
 - DeepSeek API 后端接入（含超时、重试、降级）
+- 发言输入支持语音转文字（浏览器兼容时可用）
 - Nginx + Certbot 提供 HTTPS（Let's Encrypt）
 
 ## 技术栈
@@ -97,9 +99,9 @@ APP_VERSION=dev
 MAX_ROOMS=3
 MAX_AI_CONCURRENT=2
 ROOM_TIMEOUT_MINUTES=10
-SPEECH_TIMEOUT_SECONDS=30
-VOTE_TIMEOUT_SECONDS=20
-TIEBREAK_TIMEOUT_SECONDS=15
+SPEECH_TIMEOUT_SECONDS=90
+VOTE_TIMEOUT_SECONDS=90
+TIEBREAK_TIMEOUT_SECONDS=90
 
 JWT_SECRET=change-this-to-a-random-long-secret
 ```
@@ -163,17 +165,17 @@ curl -k https://who-is-spy.online/api/health
 - 房主可在 LOBBY/END 锁房或开房（锁房期间拒绝新加入）
 - 至少 2 名真人才能开始
 - 角色固定：1 卧底 + (目标人数-1) 平民
-- 发言阶段：按存活座位顺序，每人 30 秒
+- 发言阶段：按存活座位顺序，每人 90 秒
   - 超时自动发言：`（超时）`
   - AI 回合由后端驱动生成发言
-- 投票阶段：所有存活玩家 20 秒内投票
+- 投票阶段：所有存活玩家 90 秒内投票
   - 超时默认策略：**弃权（0）**
   - AI 投票由后端驱动（失败自动降级）
 - 真人中途离开：
   - 断线可用 `resumeToken` 重连恢复控制权
   - 对局进行中主动离开时，该座位转为 AI 接管，保证流程继续
 - 平票处理：
-  - 第一次平票 -> 加赛投票 15 秒（仅平票候选可被投）
+  - 第一次平票 -> 加赛投票 90 秒（仅平票候选可被投）
   - 仍平票 -> 在平票候选中随机淘汰 1 人
 - 胜负判断：
   - 卧底出局 -> 平民胜
@@ -195,9 +197,11 @@ curl -k https://who-is-spy.online/api/health
 - 请求超时 8 秒
 - 最多重试 1 次
 - 全局并发上限：`MAX_AI_CONCURRENT`（默认 2）
+- 每局随机选择“题库出题”或“DeepSeek 现场出题”（失败自动回退题库）
 - JSON 强约束校验：
   - 发言：`{"speech":"...<=30字"}`
   - 投票：`{"vote": number}`（0=弃权，其它必须为存活座位号）
+  - 出题：`{"civilian":"平民词","undercover":"卧底词"}`
 - base_url 或 key 不可用时自动降级模板，不阻塞游戏
 
 安全可见性控制（Prompt）：
@@ -296,7 +300,8 @@ docker compose down
 3. 房主先设置目标人数（例如 6），再点击开始，观察 AI 自动补齐空位
 4. 房主点击“锁房”，新浏览器尝试加入应收到拒绝提示；再“开房”后可正常加入
 5. 完整走一局：发言 -> 投票 -> 淘汰 -> 胜负揭示
-6. 断开一个浏览器网络再恢复，确认可自动恢复房间状态
+6. 发言阶段点击“语音输入”按钮说话，确认能自动转成文本（不支持语音 API 的浏览器会提示不可用）
+7. 断开一个浏览器网络再恢复，确认可自动恢复房间状态
 
 ---
 

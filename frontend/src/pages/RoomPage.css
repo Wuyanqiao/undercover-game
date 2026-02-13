@@ -357,6 +357,42 @@
   margin-bottom: 10px;
 }
 
+.voice-controls {
+  margin-bottom: 10px;
+}
+
+.voice-btn {
+  width: 100%;
+  border: 1px solid rgba(29, 111, 101, 0.32);
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: rgba(29, 111, 101, 0.1);
+  color: var(--brand-strong);
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.voice-btn:hover:not(:disabled) {
+  background: rgba(29, 111, 101, 0.16);
+}
+
+.voice-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.voice-btn.recording {
+  border-color: rgba(194, 73, 61, 0.4);
+  background: rgba(194, 73, 61, 0.13);
+  color: #a1372c;
+}
+
+.voice-hint {
+  margin-top: 6px;
+  font-size: 0.82rem;
+  color: var(--ink-muted);
+}
+
 .capacity-control {
   margin-bottom: 10px;
 }

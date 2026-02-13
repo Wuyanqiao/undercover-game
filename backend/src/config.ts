@@ -21,7 +21,7 @@ export const config = {
   deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
   deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
   roomTimeoutMinutes: readInt('ROOM_TIMEOUT_MINUTES', 10),
-  speechTimeoutSeconds: readInt('SPEECH_TIMEOUT_SECONDS', 30),
-  voteTimeoutSeconds: readInt('VOTE_TIMEOUT_SECONDS', 20),
-  tiebreakTimeoutSeconds: readInt('TIEBREAK_TIMEOUT_SECONDS', 15)
+  speechTimeoutSeconds: readInt('SPEECH_TIMEOUT_SECONDS', 90),
+  voteTimeoutSeconds: readInt('VOTE_TIMEOUT_SECONDS', 90),
+  tiebreakTimeoutSeconds: readInt('TIEBREAK_TIMEOUT_SECONDS', 90)
 };

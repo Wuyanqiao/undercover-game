@@ -7,7 +7,7 @@ import {
   VisibleState,
   Winner
 } from '../types';
-import { getRandomWordPair } from './words';
+import { PickedWordPair, getRandomWordPair } from './words';
 
 export const MIN_PLAYERS_PER_ROOM = 4;
 export const MAX_PLAYERS_PER_ROOM = 12;
@@ -207,8 +207,8 @@ export function canStartGame(room: RoomState): { ok: boolean; reason?: string } 
   return { ok: true };
 }
 
-export function dealRoles(room: RoomState): void {
-  const picked = getRandomWordPair(room.lastWordPairKey);
+export function dealRoles(room: RoomState, providedWordPair?: PickedWordPair): void {
+  const picked = providedWordPair ?? getRandomWordPair(room.lastWordPairKey);
   room.lastWordPairKey = picked.key;
   room.civilianWord = picked.pair.civilian;
   room.undercoverWord = picked.pair.undercover;

@@ -305,7 +305,8 @@ function unbindSocket(socket: Socket): SocketSession | null {
 
 async function startGameRound(io: Server, room: RoomState): Promise<void> {
   Game.fillAIToTarget(room);
-  Game.dealRoles(room);
+  const pickedWordPair = await aiClient.generateWordPair(room.lastWordPairKey);
+  Game.dealRoles(room, pickedWordPair);
   await syncAndBroadcast(io, room, true);
 
   Game.beginSpeakingPhase(room, 1);

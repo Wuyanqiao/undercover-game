@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useGameStore } from '../store/gameStore';
 import './RoomPage.css';
@@ -19,6 +19,9 @@ function RoomPage() {
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [hasVoted, setHasVoted] = useState(false);
   const [targetCountDraft, setTargetCountDraft] = useState(4);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   const {
     connected,
@@ -81,6 +84,55 @@ function RoomPage() {
     }
     setTargetCountDraft(roomState.targetPlayerCount);
   }, [roomState?.targetPlayerCount]);
+
+  useEffect(() => {
+    const RecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    if (!RecognitionCtor) {
+      return;
+    }
+
+    const recognition = new RecognitionCtor();
+    recognition.lang = 'zh-CN';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const transcript = event.results?.[0]?.[0]?.transcript;
+      if (!transcript) {
+        return;
+      }
+      setSpeechInput((prev) => `${prev} ${transcript}`.trim().replace(/\s+/g, ' ').slice(0, 30));
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+    recognition.onerror = () => {
+      setIsListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    setVoiceSupported(true);
+
+    return () => {
+      recognition.onresult = null;
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.abort();
+      recognitionRef.current = null;
+      setIsListening(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    const me = roomState?.players.find((player) => player.seat === roomState.mySeat);
+    const myTurnNow =
+      roomState?.phase === 'SPEAKING' && roomState.currentSpeaker === roomState.mySeat && Boolean(me?.isAlive);
+
+    if (!myTurnNow && isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    }
+  }, [roomState, isListening]);
 
   const alivePlayers = useMemo(() => {
     return roomState?.players.filter((player) => player.isAlive) ?? [];
@@ -155,6 +207,25 @@ function RoomPage() {
     setRoomLocked(!roomState.isLocked);
   };
 
+  const toggleVoiceInput = () => {
+    if (!voiceSupported || !recognitionRef.current) {
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setIsListening(true);
+    } catch {
+      setIsListening(false);
+    }
+  };
+
   const inviteLink = `${window.location.origin}/#/room/${roomState.roomId}`;
 
   return (
@@ -200,10 +271,10 @@ function RoomPage() {
               {roomState.myRole === 'civilian' ? '平民' : '卧底'}
             </div>
           </div>
-            <div className="role-info role-info-word">
-              <div className="role-label">你的词</div>
-              <div className="word-value">{roomState.myWord}</div>
-            </div>
+          <div className="role-info role-info-word">
+            <div className="role-label">你的词</div>
+            <div className="word-value">{roomState.myWord}</div>
+          </div>
         </div>
       )}
 
@@ -362,15 +433,34 @@ function RoomPage() {
               if (event.key === 'Enter' && speechInput.trim()) {
                 speak(speechInput);
                 setSpeechInput('');
+                if (isListening) {
+                  recognitionRef.current?.stop();
+                }
               }
             }}
           />
+          <div className="voice-controls">
+            <button
+              type="button"
+              className={`voice-btn ${isListening ? 'recording' : ''}`}
+              disabled={!voiceSupported}
+              onClick={toggleVoiceInput}
+            >
+              {voiceSupported ? (isListening ? '停止语音输入' : '语音输入') : '当前浏览器不支持语音输入'}
+            </button>
+            {voiceSupported && (
+              <div className="voice-hint">{isListening ? '正在听写，请说话...' : '点击按钮可将语音转换为文字'}</div>
+            )}
+          </div>
           <button
             className="btn-primary"
             disabled={!speechInput.trim()}
             onClick={() => {
               speak(speechInput);
               setSpeechInput('');
+              if (isListening) {
+                recognitionRef.current?.stop();
+              }
             }}
           >
             提交发言
