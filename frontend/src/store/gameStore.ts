@@ -24,6 +24,7 @@ export interface RoomState {
   roomId: string;
   targetPlayerCount: number;
   isLocked: boolean;
+  isVoiceRoom: boolean;
   players: VisiblePlayer[];
   phase: GamePhase;
   round: number;
@@ -72,7 +73,7 @@ interface StoreState {
   gameEnd: GameEndState | null;
   ensureSocket: () => void;
   setNickname: (value: string) => void;
-  createRoom: (nickname?: string) => void;
+  createRoom: (nickname?: string, isVoiceRoom?: boolean) => void;
   joinRoom: (roomId: string, nickname?: string) => void;
   leaveRoom: () => void;
   startGame: () => void;
@@ -190,7 +191,7 @@ export const useGameStore = create<StoreState>((set, get) => ({
     set({ nickname });
   },
 
-  createRoom: (nicknameInput?: string) => {
+  createRoom: (nicknameInput?: string, isVoiceRoom = false) => {
     const socket = get().socket;
     if (!socket) {
       return;
@@ -203,7 +204,7 @@ export const useGameStore = create<StoreState>((set, get) => ({
     }
 
     get().setNickname(nickname);
-    socket.emit('room:create', { nickname });
+    socket.emit('room:create', { nickname, isVoiceRoom });
   },
 
   joinRoom: (roomIdInput: string, nicknameInput?: string) => {

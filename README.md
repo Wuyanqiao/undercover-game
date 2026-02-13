@@ -1,6 +1,6 @@
 # 谁是卧底（Undercover Game）
 
-在线版“谁是卧底”网页游戏，支持 2~12 真人，房主可设置 4~12 座位，不足座位自动 AI 补全。
+在线版“谁是卧底”网页游戏，支持 2~12 真人，房主可设置 4~12 座位。普通房可 AI 补位，语音房仅支持真人。
 
 已按 Ubuntu 22.04 + 2核2G 服务器部署场景设计，支持 `docker compose up -d --build` 一键启动。
 
@@ -8,6 +8,7 @@
 
 - 房主可设置 4~12 座位，真人不足自动补 AI
 - 房主可锁房/开房，锁房后禁止新玩家加入
+- 开房可选“语音房”，语音房仅真人、按轮次单人开麦
 - 每局词语随机来源：内置题库或 DeepSeek 现场出题
 - 无登录系统，游客昵称即可进入
 - 最多同时 3 个活跃房间
@@ -161,19 +162,23 @@ curl -k https://who-is-spy.online/api/health
 
 规则实现：
 
-- 房主可设置房间目标人数为 4~12，开始时真人不足自动补 AI
+- 房主可设置房间目标人数为 4~12，开始时真人不足自动补 AI（普通房）
 - 房主可在 LOBBY/END 锁房或开房（锁房期间拒绝新加入）
 - 至少 2 名真人才能开始
+- 语音房：必须满员真人后才能开始，不补 AI
 - 角色固定：1 卧底 + (目标人数-1) 平民
 - 发言阶段：按存活座位顺序，每人 90 秒
   - 超时自动发言：`（超时）`
-  - AI 回合由后端驱动生成发言
+  - AI 回合由后端驱动生成发言（普通房）
+  - 语音房中仅当前发言玩家可开麦，其他玩家自动静音
 - 投票阶段：所有存活玩家 90 秒内投票
+  - 语音房投票阶段全员静音
   - 超时默认策略：**弃权（0）**
-  - AI 投票由后端驱动（失败自动降级）
+  - AI 投票由后端驱动（失败自动降级，普通房）
 - 真人中途离开：
   - 断线可用 `resumeToken` 重连恢复控制权
-  - 对局进行中主动离开时，该座位转为 AI 接管，保证流程继续
+  - 普通房对局中主动离开时，该座位转为 AI 接管，保证流程继续
+  - 语音房对局中主动离开会被禁止（需等待结算后离开）
 - 平票处理：
   - 第一次平票 -> 加赛投票 90 秒（仅平票候选可被投）
   - 仍平票 -> 在平票候选中随机淘汰 1 人
@@ -220,7 +225,7 @@ curl -k https://who-is-spy.online/api/health
 
 客户端 -> 服务端：
 
-- `room:create { nickname }`
+- `room:create { nickname, isVoiceRoom }`
 - `room:join { roomId, nickname }`
 - `room:leave {}`
 - `room:target:set { targetPlayerCount }`（房主在 LOBBY/END 可设置 4~12）
@@ -230,10 +235,13 @@ curl -k https://who-is-spy.online/api/health
 - `game:speak { text }`
 - `game:vote { toSeat }`
 - `game:ping {}`
+- `voice:offer { toSeat, sdp }`（语音房）
+- `voice:answer { toSeat, sdp }`（语音房）
+- `voice:ice { toSeat, candidate }`（语音房）
 
 服务端 -> 客户端：
 
-- `room:state { ...visibleSnapshot }`
+- `room:state { ...visibleSnapshot }`（包含 `isVoiceRoom`）
 - `room:error { message, code }`
 - `game:phase { phase, round, deadlineTs }`
 - `game:speech { seat, text, round }`
@@ -293,7 +301,7 @@ docker compose down
 - 已达到活跃房间上限 3
 - 等待房间结束/销毁，或主动离开空房
 
-## 13) 最小 e2e 自测（2 人 + 2 AI）
+## 13) 最小 e2e 自测（普通房 + 语音房）
 
 1. 浏览器 A 打开首页，输入昵称，创建房间
 2. 浏览器 B 打开首页，输入昵称，加入同房间
@@ -302,6 +310,13 @@ docker compose down
 5. 完整走一局：发言 -> 投票 -> 淘汰 -> 胜负揭示
 6. 发言阶段点击“语音输入”按钮说话，确认能自动转成文本（不支持语音 API 的浏览器会提示不可用）
 7. 断开一个浏览器网络再恢复，确认可自动恢复房间状态
+
+语音房补充：
+
+1. 创建房间时勾选“语音房（仅真人，无 AI）”
+2. 未满员时“开始游戏”按钮不可用
+3. 进入发言轮次，只有当前发言玩家麦克风为“可发言”，其他人“静音中”
+4. 进入投票阶段，全员保持静音
 
 ---
 

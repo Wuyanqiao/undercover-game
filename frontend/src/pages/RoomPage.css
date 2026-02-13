@@ -131,6 +131,14 @@
   color: #b13b31;
 }
 
+.voice-room-tag {
+  color: #235d8f;
+}
+
+.voice-room-error {
+  color: #a1372c;
+}
+
 .role-info {
   border: 1px solid rgba(70, 60, 48, 0.14);
   background: rgba(255, 255, 255, 0.72);
@@ -433,6 +441,18 @@
 .start-btn {
   color: #fff;
   background: linear-gradient(135deg, #2d8f53, #1f6f3f);
+}
+
+.start-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.voice-room-warn {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: #a45a1b;
 }
 
 .voting-options {

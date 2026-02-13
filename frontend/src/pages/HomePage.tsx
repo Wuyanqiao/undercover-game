@@ -4,6 +4,7 @@ import './HomePage.css';
 
 function HomePage() {
   const [roomId, setRoomId] = useState('');
+  const [isVoiceRoom, setIsVoiceRoom] = useState(false);
   const {
     connected,
     error,
@@ -25,7 +26,7 @@ function HomePage() {
   return (
     <div className="home-page">
       <h1>谁是卧底</h1>
-      <p className="subtitle">2~12 真人，房主可设 4~12 座并自动 AI 补位</p>
+      <p className="subtitle">2~12 真人，支持普通房与语音房（语音房仅真人）</p>
 
       <div className={`connection-status ${connected ? 'connected' : 'disconnected'}`}>
         {connected ? '服务器已连接' : '连接中...'}
@@ -47,10 +48,18 @@ function HomePage() {
         <button
           className="btn-primary"
           disabled={!connected || !nickname.trim()}
-          onClick={() => createRoom(nickname)}
+          onClick={() => createRoom(nickname, isVoiceRoom)}
         >
-          创建房间
+          创建{isVoiceRoom ? '语音房' : '普通房'}
         </button>
+        <label className="voice-room-toggle">
+          <input
+            type="checkbox"
+            checked={isVoiceRoom}
+            onChange={(event) => setIsVoiceRoom(event.target.checked)}
+          />
+          <span>语音房（仅真人，无 AI）</span>
+        </label>
       </div>
 
       <div className="divider">或</div>

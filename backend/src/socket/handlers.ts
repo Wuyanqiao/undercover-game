@@ -49,6 +49,7 @@ const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function ensureRoomShape(room: RoomState): void {
   room.targetPlayerCount = Game.normalizeTargetPlayerCount(room.targetPlayerCount ?? Game.DEFAULT_TARGET_PLAYER_COUNT);
   room.isLocked = Boolean(room.isLocked);
+  room.isVoiceRoom = Boolean(room.isVoiceRoom);
 }
 
 function roomChannel(roomId: string): string {
@@ -304,7 +305,9 @@ function unbindSocket(socket: Socket): SocketSession | null {
 }
 
 async function startGameRound(io: Server, room: RoomState): Promise<void> {
-  Game.fillAIToTarget(room);
+  if (!room.isVoiceRoom) {
+    Game.fillAIToTarget(room);
+  }
   const pickedWordPair = await aiClient.generateWordPair(room.lastWordPairKey);
   Game.dealRoles(room, pickedWordPair);
   await syncAndBroadcast(io, room, true);
@@ -545,7 +548,7 @@ export function setupSocketHandlers(io: Server): void {
   io.on('connection', (socket: Socket) => {
     logger.info({ socketId: socket.id }, 'Socket connected');
 
-    socket.on('room:create', async (payload: { nickname?: string }) => {
+    socket.on('room:create', async (payload: { nickname?: string; isVoiceRoom?: boolean }) => {
       if (!allowSocketMessage(socket.id)) {
         emitError(socket, '操作过于频繁', 'RATE_LIMIT');
         return;
@@ -574,7 +577,7 @@ export function setupSocketHandlers(io: Server): void {
         return;
       }
 
-      const room = Game.createRoom(roomId, nickname, socket.id);
+      const room = Game.createRoom(roomId, nickname, socket.id, Boolean(payload.isVoiceRoom));
       clearPendingDestroy(room);
       bindSocketToRoom(socket, room, 1);
 
@@ -699,7 +702,7 @@ export function setupSocketHandlers(io: Server): void {
         return;
       }
 
-      const session = unbindSocket(socket);
+      const session = socketSessions.get(socket.id);
       if (!session) {
         return;
       }
@@ -709,13 +712,23 @@ export function setupSocketHandlers(io: Server): void {
         return;
       }
 
-      const leavingPlayer = Game.getPlayer(room, session.seat);
+      if (room.isVoiceRoom && room.phase !== 'LOBBY' && room.phase !== 'END') {
+        emitError(socket, '语音房对局中不可离开，请等待结算后退出', 'VOICE_ROOM_LEAVE_FORBIDDEN');
+        return;
+      }
+
+      const activeSession = unbindSocket(socket);
+      if (!activeSession) {
+        return;
+      }
+
+      const leavingPlayer = Game.getPlayer(room, activeSession.seat);
       if (leavingPlayer?.resumeJti) {
         await deleteResumeRecord(leavingPlayer.resumeJti);
         leavingPlayer.resumeJti = undefined;
       }
 
-      Game.removeOrConvertHumanPlayer(room, session.seat);
+      Game.removeOrConvertHumanPlayer(room, activeSession.seat);
       refreshPendingDestroy(room);
 
       await syncAndBroadcast(io, room);
@@ -955,6 +968,124 @@ export function setupSocketHandlers(io: Server): void {
       if (Game.allAlivePlayersVoted(room)) {
         await resolveVoting(io, room);
       }
+    });
+
+    socket.on('voice:offer', async (payload: { toSeat?: number; sdp?: unknown }) => {
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (!room.isVoiceRoom) {
+        emitError(socket, '当前房间不是语音房', 'NOT_VOICE_ROOM');
+        return;
+      }
+
+      const toSeat = Number(payload.toSeat);
+      if (!Number.isInteger(toSeat) || toSeat <= 0 || toSeat === session.seat) {
+        emitError(socket, '无效的语音目标', 'INVALID_VOICE_TARGET');
+        return;
+      }
+
+      const sender = Game.getPlayer(room, session.seat);
+      const target = Game.getPlayer(room, toSeat);
+      if (!sender || sender.isAI || !target || target.isAI || !target.socketId) {
+        emitError(socket, '目标玩家不在线', 'VOICE_TARGET_OFFLINE');
+        return;
+      }
+
+      const targetSocket = io.sockets.sockets.get(target.socketId);
+      if (!targetSocket) {
+        emitError(socket, '目标玩家不在线', 'VOICE_TARGET_OFFLINE');
+        return;
+      }
+
+      targetSocket.emit('voice:offer', { fromSeat: session.seat, sdp: payload.sdp });
+    });
+
+    socket.on('voice:answer', async (payload: { toSeat?: number; sdp?: unknown }) => {
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (!room.isVoiceRoom) {
+        emitError(socket, '当前房间不是语音房', 'NOT_VOICE_ROOM');
+        return;
+      }
+
+      const toSeat = Number(payload.toSeat);
+      if (!Number.isInteger(toSeat) || toSeat <= 0 || toSeat === session.seat) {
+        emitError(socket, '无效的语音目标', 'INVALID_VOICE_TARGET');
+        return;
+      }
+
+      const sender = Game.getPlayer(room, session.seat);
+      const target = Game.getPlayer(room, toSeat);
+      if (!sender || sender.isAI || !target || target.isAI || !target.socketId) {
+        emitError(socket, '目标玩家不在线', 'VOICE_TARGET_OFFLINE');
+        return;
+      }
+
+      const targetSocket = io.sockets.sockets.get(target.socketId);
+      if (!targetSocket) {
+        emitError(socket, '目标玩家不在线', 'VOICE_TARGET_OFFLINE');
+        return;
+      }
+
+      targetSocket.emit('voice:answer', { fromSeat: session.seat, sdp: payload.sdp });
+    });
+
+    socket.on('voice:ice', async (payload: { toSeat?: number; candidate?: unknown }) => {
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (!room.isVoiceRoom) {
+        emitError(socket, '当前房间不是语音房', 'NOT_VOICE_ROOM');
+        return;
+      }
+
+      const toSeat = Number(payload.toSeat);
+      if (!Number.isInteger(toSeat) || toSeat <= 0 || toSeat === session.seat) {
+        emitError(socket, '无效的语音目标', 'INVALID_VOICE_TARGET');
+        return;
+      }
+
+      const sender = Game.getPlayer(room, session.seat);
+      const target = Game.getPlayer(room, toSeat);
+      if (!sender || sender.isAI || !target || target.isAI || !target.socketId) {
+        return;
+      }
+
+      const targetSocket = io.sockets.sockets.get(target.socketId);
+      if (!targetSocket) {
+        return;
+      }
+
+      targetSocket.emit('voice:ice', { fromSeat: session.seat, candidate: payload.candidate });
     });
 
     socket.on('game:ping', () => {

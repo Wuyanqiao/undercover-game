@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useGameStore } from '../store/gameStore';
 import './RoomPage.css';
@@ -12,6 +12,23 @@ const PHASE_TEXT: Record<string, string> = {
   END: '游戏结束'
 };
 
+const VOICE_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+interface VoiceOfferPayload {
+  fromSeat: number;
+  sdp: RTCSessionDescriptionInit;
+}
+
+interface VoiceAnswerPayload {
+  fromSeat: number;
+  sdp: RTCSessionDescriptionInit;
+}
+
+interface VoiceIcePayload {
+  fromSeat: number;
+  candidate: RTCIceCandidateInit;
+}
+
 function RoomPage() {
   const { roomId: roomIdParam = '' } = useParams();
   const navigate = useNavigate();
@@ -22,9 +39,17 @@ function RoomPage() {
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const [voiceMicReady, setVoiceMicReady] = useState(false);
+  const [voiceCanSpeak, setVoiceCanSpeak] = useState(false);
+  const [voiceRoomError, setVoiceRoomError] = useState<string | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const peerConnectionsRef = useRef<Map<number, RTCPeerConnection>>(new Map());
+  const remoteAudioRef = useRef<Map<number, HTMLAudioElement>>(new Map());
+  const offeredPeersRef = useRef<Set<number>>(new Set());
 
   const {
     connected,
+    socket,
     error,
     clearError,
     nickname,
@@ -84,6 +109,312 @@ function RoomPage() {
     }
     setTargetCountDraft(roomState.targetPlayerCount);
   }, [roomState?.targetPlayerCount]);
+
+  const clearVoiceResources = useCallback(() => {
+    for (const connection of peerConnectionsRef.current.values()) {
+      connection.onicecandidate = null;
+      connection.ontrack = null;
+      connection.onconnectionstatechange = null;
+      connection.close();
+    }
+    peerConnectionsRef.current.clear();
+    offeredPeersRef.current.clear();
+
+    for (const audio of remoteAudioRef.current.values()) {
+      audio.srcObject = null;
+      audio.remove();
+    }
+    remoteAudioRef.current.clear();
+
+    if (localStreamRef.current) {
+      for (const track of localStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      localStreamRef.current = null;
+    }
+
+    setVoiceMicReady(false);
+    setVoiceCanSpeak(false);
+  }, []);
+
+  useEffect(() => {
+    if (!inCurrentRoom || !roomState?.isVoiceRoom || !socket) {
+      clearVoiceResources();
+      setVoiceRoomError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const getOrCreateAudio = (seat: number): HTMLAudioElement => {
+      const existing = remoteAudioRef.current.get(seat);
+      if (existing) {
+        return existing;
+      }
+      const audio = document.createElement('audio');
+      audio.autoplay = true;
+      audio.setAttribute('playsinline', 'true');
+      audio.dataset.seat = String(seat);
+      remoteAudioRef.current.set(seat, audio);
+      return audio;
+    };
+
+    const removeAudio = (seat: number): void => {
+      const audio = remoteAudioRef.current.get(seat);
+      if (!audio) {
+        return;
+      }
+      audio.srcObject = null;
+      audio.remove();
+      remoteAudioRef.current.delete(seat);
+    };
+
+    const getOrCreatePeerConnection = (remoteSeat: number): RTCPeerConnection | null => {
+      const cached = peerConnectionsRef.current.get(remoteSeat);
+      if (cached) {
+        return cached;
+      }
+
+      if (!localStreamRef.current || roomState.mySeat === undefined) {
+        return null;
+      }
+
+      const mySeat = roomState.mySeat;
+      const connection = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS });
+
+      for (const track of localStreamRef.current.getTracks()) {
+        connection.addTrack(track, localStreamRef.current);
+      }
+
+      connection.onicecandidate = (event) => {
+        if (!event.candidate) {
+          return;
+        }
+        socket.emit('voice:ice', {
+          toSeat: remoteSeat,
+          candidate: event.candidate.toJSON()
+        });
+      };
+
+      connection.ontrack = (event) => {
+        const audio = getOrCreateAudio(remoteSeat);
+        const [stream] = event.streams;
+        if (stream) {
+          audio.srcObject = stream;
+        }
+      };
+
+      connection.onconnectionstatechange = () => {
+        if (connection.connectionState === 'failed' || connection.connectionState === 'closed') {
+          connection.close();
+          peerConnectionsRef.current.delete(remoteSeat);
+          offeredPeersRef.current.delete(remoteSeat);
+          removeAudio(remoteSeat);
+        }
+      };
+
+      peerConnectionsRef.current.set(remoteSeat, connection);
+
+      if (mySeat < remoteSeat && !offeredPeersRef.current.has(remoteSeat)) {
+        offeredPeersRef.current.add(remoteSeat);
+        void (async () => {
+          try {
+            const offer = await connection.createOffer();
+            await connection.setLocalDescription(offer);
+            socket.emit('voice:offer', { toSeat: remoteSeat, sdp: offer });
+          } catch {
+            offeredPeersRef.current.delete(remoteSeat);
+          }
+        })();
+      }
+
+      return connection;
+    };
+
+    const setupLocalStream = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setVoiceRoomError('当前浏览器不支持语音房');
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        if (cancelled) {
+          for (const track of stream.getTracks()) {
+            track.stop();
+          }
+          return;
+        }
+
+        localStreamRef.current = stream;
+        for (const track of stream.getAudioTracks()) {
+          track.enabled = false;
+        }
+        setVoiceMicReady(true);
+        setVoiceRoomError(null);
+      } catch {
+        if (!cancelled) {
+          setVoiceMicReady(false);
+          setVoiceRoomError('麦克风不可用，请检查浏览器授权');
+        }
+      }
+    };
+
+    const onVoiceOffer = (payload: VoiceOfferPayload) => {
+      void (async () => {
+        const connection = getOrCreatePeerConnection(payload.fromSeat);
+        if (!connection) {
+          return;
+        }
+        try {
+          await connection.setRemoteDescription(payload.sdp);
+          const answer = await connection.createAnswer();
+          await connection.setLocalDescription(answer);
+          socket.emit('voice:answer', { toSeat: payload.fromSeat, sdp: answer });
+        } catch {
+          // ignore broken negotiation
+        }
+      })();
+    };
+
+    const onVoiceAnswer = (payload: VoiceAnswerPayload) => {
+      const connection = peerConnectionsRef.current.get(payload.fromSeat);
+      if (!connection) {
+        return;
+      }
+      void connection.setRemoteDescription(payload.sdp).catch(() => {
+        // ignore invalid SDP
+      });
+    };
+
+    const onVoiceIce = (payload: VoiceIcePayload) => {
+      const connection = peerConnectionsRef.current.get(payload.fromSeat);
+      if (!connection || !payload.candidate) {
+        return;
+      }
+      void connection.addIceCandidate(payload.candidate).catch(() => {
+        // ignore broken candidate
+      });
+    };
+
+    socket.on('voice:offer', onVoiceOffer);
+    socket.on('voice:answer', onVoiceAnswer);
+    socket.on('voice:ice', onVoiceIce);
+    void setupLocalStream();
+
+    return () => {
+      cancelled = true;
+      socket.off('voice:offer', onVoiceOffer);
+      socket.off('voice:answer', onVoiceAnswer);
+      socket.off('voice:ice', onVoiceIce);
+      clearVoiceResources();
+    };
+  }, [clearVoiceResources, inCurrentRoom, roomState?.isVoiceRoom, roomState?.mySeat, socket]);
+
+  useEffect(() => {
+    if (!inCurrentRoom || !roomState?.isVoiceRoom || roomState.mySeat === undefined || !socket) {
+      return;
+    }
+
+    const mySeat = roomState.mySeat;
+    const remoteSeats = new Set(
+      roomState.players
+        .filter((player) => !player.isAI && player.connected && player.seat !== mySeat)
+        .map((player) => player.seat)
+    );
+
+    for (const remoteSeat of remoteSeats) {
+      if (peerConnectionsRef.current.has(remoteSeat)) {
+        continue;
+      }
+
+      if (!localStreamRef.current) {
+        continue;
+      }
+
+      const connection = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS });
+      for (const track of localStreamRef.current.getTracks()) {
+        connection.addTrack(track, localStreamRef.current);
+      }
+
+      connection.onicecandidate = (event) => {
+        if (!event.candidate) {
+          return;
+        }
+        socket.emit('voice:ice', {
+          toSeat: remoteSeat,
+          candidate: event.candidate.toJSON()
+        });
+      };
+
+      connection.ontrack = (event) => {
+        const existing = remoteAudioRef.current.get(remoteSeat);
+        const audio = existing ?? document.createElement('audio');
+        audio.autoplay = true;
+        audio.setAttribute('playsinline', 'true');
+        audio.dataset.seat = String(remoteSeat);
+        const [stream] = event.streams;
+        if (stream) {
+          audio.srcObject = stream;
+        }
+        remoteAudioRef.current.set(remoteSeat, audio);
+      };
+
+      connection.onconnectionstatechange = () => {
+        if (connection.connectionState === 'failed' || connection.connectionState === 'closed') {
+          connection.close();
+          peerConnectionsRef.current.delete(remoteSeat);
+          offeredPeersRef.current.delete(remoteSeat);
+          const audio = remoteAudioRef.current.get(remoteSeat);
+          if (audio) {
+            audio.srcObject = null;
+            audio.remove();
+          }
+          remoteAudioRef.current.delete(remoteSeat);
+        }
+      };
+
+      peerConnectionsRef.current.set(remoteSeat, connection);
+
+      if (mySeat < remoteSeat && !offeredPeersRef.current.has(remoteSeat)) {
+        offeredPeersRef.current.add(remoteSeat);
+        void (async () => {
+          try {
+            const offer = await connection.createOffer();
+            await connection.setLocalDescription(offer);
+            socket.emit('voice:offer', { toSeat: remoteSeat, sdp: offer });
+          } catch {
+            offeredPeersRef.current.delete(remoteSeat);
+          }
+        })();
+      }
+    }
+
+    for (const [seat, connection] of peerConnectionsRef.current.entries()) {
+      if (remoteSeats.has(seat)) {
+        continue;
+      }
+      connection.close();
+      peerConnectionsRef.current.delete(seat);
+      offeredPeersRef.current.delete(seat);
+      const audio = remoteAudioRef.current.get(seat);
+      if (audio) {
+        audio.srcObject = null;
+        audio.remove();
+      }
+      remoteAudioRef.current.delete(seat);
+    }
+
+    const me = roomState.players.find((player) => player.seat === mySeat);
+    const canSpeakNow = roomState.phase === 'SPEAKING' && roomState.currentSpeaker === mySeat && Boolean(me?.isAlive);
+    setVoiceCanSpeak(canSpeakNow);
+
+    if (localStreamRef.current) {
+      for (const track of localStreamRef.current.getAudioTracks()) {
+        track.enabled = canSpeakNow;
+      }
+    }
+  }, [inCurrentRoom, roomState, socket]);
 
   useEffect(() => {
     const RecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
@@ -197,6 +528,8 @@ function RoomPage() {
   const myTurn = roomState.phase === 'SPEAKING' && roomState.currentSpeaker === mySeat && myAlive;
   const votingNow = roomState.phase === 'VOTING' && myAlive;
   const allSeats = Array.from({ length: roomState.targetPlayerCount }, (_, index) => index + 1);
+  const humanCount = roomState.players.filter((player) => !player.isAI).length;
+  const voiceRoomCanStart = !roomState.isVoiceRoom || humanCount === roomState.targetPlayerCount;
 
   const handleLeave = () => {
     leaveRoom();
@@ -260,6 +593,13 @@ function RoomPage() {
         <div className={`meta-line lock-state ${roomState.isLocked ? 'locked' : 'open'}`}>
           房间状态: {roomState.isLocked ? '已上锁（禁止新玩家加入）' : '开放中'}
         </div>
+        {roomState.isVoiceRoom && (
+          <>
+            <div className="meta-line voice-room-tag">语音房模式：仅当前发言玩家可开麦，投票阶段全员静音</div>
+            <div className="meta-line">麦克风状态：{voiceMicReady ? (voiceCanSpeak ? '可发言' : '静音中') : '未就绪'}</div>
+            {voiceRoomError && <div className="meta-line voice-room-error">{voiceRoomError}</div>}
+          </>
+        )}
       </div>
 
       {roomState.phase !== 'LOBBY' && roomState.myRole && (
@@ -338,7 +678,7 @@ function RoomPage() {
                 <button className="room-lock-btn" onClick={toggleRoomLock}>
                   {roomState.isLocked ? '开房（允许加入）' : '锁房（禁止加入）'}
                 </button>
-                <button className="start-btn" onClick={restartGame}>
+                <button className="start-btn" disabled={!voiceRoomCanStart} onClick={restartGame}>
                   再来一局
                 </button>
               </>
@@ -408,9 +748,13 @@ function RoomPage() {
           <button className="room-lock-btn" onClick={toggleRoomLock}>
             {roomState.isLocked ? '开房（允许加入）' : '锁房（禁止加入）'}
           </button>
-          <button className="start-btn" onClick={startGame}>
-            开始游戏（真人 {roomState.players.filter((player) => !player.isAI).length}/{roomState.targetPlayerCount}）
+          <button className="start-btn" disabled={!voiceRoomCanStart} onClick={startGame}>
+            开始游戏（真人 {humanCount}/{roomState.targetPlayerCount}
+            {roomState.isVoiceRoom ? '，语音房需满员' : ''}）
           </button>
+          {roomState.isVoiceRoom && !voiceRoomCanStart && (
+            <div className="voice-room-warn">语音房不能补 AI，请等待真人满员后开始。</div>
+          )}
         </div>
       )}
 

@@ -47,7 +47,7 @@ function getAllSeats(room: RoomState): SeatNumber[] {
   return Array.from({ length: room.targetPlayerCount }, (_, index) => index + 1);
 }
 
-export function createRoom(roomId: string, hostNickname: string, socketId: string): RoomState {
+export function createRoom(roomId: string, hostNickname: string, socketId: string, isVoiceRoom = false): RoomState {
   const host: PlayerState = {
     seat: 1,
     nickname: sanitizeNickname(hostNickname),
@@ -62,6 +62,7 @@ export function createRoom(roomId: string, hostNickname: string, socketId: strin
     hostSeat: 1,
     targetPlayerCount: DEFAULT_TARGET_PLAYER_COUNT,
     isLocked: false,
+    isVoiceRoom,
     phase: 'LOBBY',
     round: 0,
     players: [host],
@@ -204,6 +205,16 @@ export function canStartGame(room: RoomState): { ok: boolean; reason?: string } 
   if (getHumanCount(room) < 2) {
     return { ok: false, reason: '至少需要2名真人玩家才能开始' };
   }
+
+  if (room.isVoiceRoom) {
+    if (room.players.some((player) => player.isAI)) {
+      return { ok: false, reason: '语音房仅支持真人玩家，不能包含AI' };
+    }
+    if (getHumanCount(room) !== room.targetPlayerCount) {
+      return { ok: false, reason: `语音房需满员后开始（当前 ${getHumanCount(room)}/${room.targetPlayerCount}）` };
+    }
+  }
+
   return { ok: true };
 }
 
@@ -436,6 +447,7 @@ export function buildVisibleState(room: RoomState, viewerSeat?: SeatNumber): Vis
     roomId: room.id,
     targetPlayerCount: room.targetPlayerCount,
     isLocked: room.isLocked,
+    isVoiceRoom: room.isVoiceRoom,
     players: [...room.players]
       .sort((a, b) => a.seat - b.seat)
       .map((p) => ({
