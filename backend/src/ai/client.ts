@@ -1,245 +1,360 @@
-import { logger } from '../logger';
 import { config } from '../config';
-import { PlayerRole, SeatNumber, SpeechRecord } from '../types';
+import { logger } from '../logger';
+import { AIContext, SeatNumber, VoteTarget } from '../types';
 
-interface AIContext {
-  mySeat: SeatNumber;
-  myRole: PlayerRole;
-  myWord: string;
-  round: number;
-  speeches: SpeechRecord[];
-  aliveSeats: SeatNumber[];
-}
-
-interface AISpeechRequest {
-  context: AIContext;
-}
-
-interface AIVoteRequest {
-  context: AIContext;
-}
-
-// Fallback templates when AI fails
-const fallbackSpeeches = {
-  civilian: [
-    '我觉得这个词应该和{word}有关',
-    '从{word}的角度想，应该是个常见的东西',
-    '{word}，这个词描述的很清楚',
-    '我觉得{word}这个特征很明显',
-    '和{word}相关的，应该是日常用品'
-  ],
-  undercover: [
-    '这个词听起来很特别',
-    '我觉得可能是某种物品',
-    '描述一下特征的话...',
-    '这个词让我想到某种常见的东西',
-    '从字面意思理解的话...'
-  ]
+type ChatMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
 };
 
-export class AIClient {
-  private apiKey: string;
-  private baseUrl: string;
-  private model: string;
-  private requestQueue: Promise<any>[] = [];
+interface ModelAdapter {
+  chat(messages: ChatMessage[]): Promise<string>;
+}
 
-  constructor() {
-    this.apiKey = config.deepseekApiKey;
-    this.baseUrl = config.deepseekBaseUrl;
-    this.model = config.deepseekModel;
+interface CompletionResponse {
+  choices: Array<{
+    message: {
+      content: string;
+    };
+  }>;
+}
+
+class Semaphore {
+  private readonly max: number;
+  private active = 0;
+  private waiters: Array<() => void> = [];
+
+  constructor(max: number) {
+    this.max = Math.max(1, max);
   }
 
-  private async makeRequest(messages: any[]): Promise<any> {
-    // Check if base URL is available
-    if (!this.baseUrl || this.baseUrl.includes('placeholder')) {
-      throw new Error('AI base URL not configured');
+  async use<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await task();
+    } finally {
+      this.release();
+    }
+  }
+
+  private async acquire(): Promise<void> {
+    if (this.active < this.max) {
+      this.active += 1;
+      return;
     }
 
+    await new Promise<void>((resolve) => {
+      this.waiters.push(resolve);
+    });
+    this.active += 1;
+  }
+
+  private release(): void {
+    this.active -= 1;
+    const next = this.waiters.shift();
+    if (next) {
+      next();
+    }
+  }
+}
+
+class DeepSeekAdapter implements ModelAdapter {
+  private readonly baseUrl: string;
+  private readonly apiKey: string;
+  private readonly model: string;
+
+  constructor(baseUrl: string, apiKey: string, model: string) {
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.apiKey = apiKey;
+    this.model = model;
+  }
+
+  async chat(messages: ChatMessage[]): Promise<string> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.requestOnce(messages);
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) {
+          logger.warn({ err: error }, 'AI request failed, retrying once');
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  private async requestOnce(messages: ChatMessage[]): Promise<string> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const timeout = setTimeout(() => controller.abort(), 8000);
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`
+          Authorization: `Bearer ${this.apiKey}`
         },
         body: JSON.stringify({
           model: this.model,
           messages,
-          temperature: 0.7,
-          max_tokens: 150
+          temperature: 0.4,
+          max_tokens: 120
         }),
         signal: controller.signal
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
-        throw new Error(`AI API error: ${response.status}`);
+        throw new Error(`DeepSeek API error ${response.status}`);
       }
 
-      const data = await response.json();
-      return data.choices[0].message.content;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      throw error;
-    }
-  }
-
-  private async queueRequest<T>(fn: () => Promise<T>): Promise<T> {
-    // Limit concurrent AI requests
-    while (this.requestQueue.length >= config.maxAIConcurrent) {
-      await Promise.race(this.requestQueue);
-    }
-
-    const requestPromise = fn().finally(() => {
-      const index = this.requestQueue.indexOf(requestPromise);
-      if (index > -1) {
-        this.requestQueue.splice(index, 1);
+      const payload: unknown = await response.json();
+      const content = extractContent(payload);
+      if (!content) {
+        throw new Error('DeepSeek response missing choices[0].message.content');
       }
-    });
 
-    this.requestQueue.push(requestPromise);
-    return requestPromise;
+      return content;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function extractContent(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
   }
 
-  private parseJSONResponse(content: string): any {
+  const parsed = payload as CompletionResponse;
+  const content = parsed.choices?.[0]?.message?.content;
+  return typeof content === 'string' ? content : null;
+}
+
+function extractJsonObject(text: string): unknown {
+  const trimmed = text.trim();
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // ignore
+  }
+
+  const codeBlock = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (codeBlock?.[1]) {
     try {
-      // Try to extract JSON from markdown code blocks
-      const jsonMatch = content.match(/```json\s*([\s\S]*?)```/) || 
-                       content.match(/```\s*([\s\S]*?)```/) ||
-                       content.match(/{[\s\S]*}/);
-      
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[1] || jsonMatch[0]);
-      }
-      
-      return JSON.parse(content);
-    } catch (error) {
-      logger.warn({ content }, 'Failed to parse AI JSON response');
-      return null;
+      return JSON.parse(codeBlock[1].trim());
+    } catch {
+      // ignore
     }
+  }
+
+  const first = trimmed.indexOf('{');
+  const last = trimmed.lastIndexOf('}');
+  if (first >= 0 && last > first) {
+    try {
+      return JSON.parse(trimmed.slice(first, last + 1));
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+function validateSpeechJson(input: unknown): string | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const value = (input as { speech?: unknown }).speech;
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/\s+/g, ' ').slice(0, 30);
+  return normalized || null;
+}
+
+function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const raw = (input as { vote?: unknown }).vote;
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) {
+    return null;
+  }
+
+  if (raw === 0) {
+    return 0;
+  }
+
+  if (raw >= 1 && raw <= 4 && aliveSeats.includes(raw as SeatNumber)) {
+    return raw as SeatNumber;
+  }
+
+  return null;
+}
+
+const fallbackCivilianSpeech = [
+  '这个词很常见，生活里经常出现。',
+  '它比较具体，大家应该都接触过。',
+  '我觉得它偏向日常场景。',
+  '这个词给人的感觉比较直观。'
+];
+
+const fallbackUndercoverSpeech = [
+  '这个词应该属于常见类别。',
+  '我觉得它和生活场景有关。',
+  '这个词描述起来不算抽象。',
+  '从体验上说，大家可能都见过。'
+];
+
+export class AIClient {
+  private readonly adapter: ModelAdapter | null;
+  private readonly semaphore: Semaphore;
+  private disabledLogged = false;
+
+  constructor() {
+    this.semaphore = new Semaphore(config.maxAIConcurrent);
+    this.adapter = this.buildAdapter();
   }
 
   async generateSpeech(context: AIContext): Promise<string> {
-    return this.queueRequest(async () => {
+    return this.semaphore.use(async () => {
+      if (!this.adapter) {
+        this.logDisabledOnce();
+        return this.fallbackSpeech(context);
+      }
+
       try {
-        const prompt = this.buildSpeechPrompt(context);
-        const content = await this.makeRequest([
+        const content = await this.adapter.chat([
           {
             role: 'system',
-            content: '你是一个在玩"谁是卧底"游戏的玩家。请根据你看到的词和之前的对话，生成简短的发言（不超过30字）。你必须以JSON格式输出：{"speech": "你的发言"}'
+            content:
+              '你是“谁是卧底”玩家。只输出 JSON，不要任何解释或 markdown。JSON schema: {"speech":"string<=30字"}。'
           },
           {
             role: 'user',
-            content: prompt
+            content: this.buildSpeechPrompt(context)
           }
         ]);
 
-        const parsed = this.parseJSONResponse(content);
-        if (parsed && parsed.speech) {
-          return parsed.speech.slice(0, 30);
+        const parsed = extractJsonObject(content);
+        const speech = validateSpeechJson(parsed);
+        if (!speech) {
+          throw new Error('AI speech JSON schema validation failed');
         }
 
-        // Fallback to template
-        return this.getFallbackSpeech(context);
+        return speech;
       } catch (error) {
-        logger.error(error, 'AI speech generation failed, using fallback');
-        return this.getFallbackSpeech(context);
+        logger.warn({ err: error }, 'AI speech failed, fallback applied');
+        return this.fallbackSpeech(context);
       }
     });
   }
 
-  async generateVote(context: AIContext): Promise<number> {
-    return this.queueRequest(async () => {
+  async generateVote(context: AIContext): Promise<VoteTarget> {
+    return this.semaphore.use(async () => {
+      if (!this.adapter) {
+        this.logDisabledOnce();
+        return this.fallbackVote(context);
+      }
+
       try {
-        const prompt = this.buildVotePrompt(context);
-        const content = await this.makeRequest([
+        const content = await this.adapter.chat([
           {
             role: 'system',
-            content: '你是一个在玩"谁是卧底"游戏的玩家。请根据对话和投票情况，选择要投票的座位号（1-4）或0表示弃权。你必须以JSON格式输出：{"vote": 座位号}'
+            content:
+              '你是“谁是卧底”玩家。只输出 JSON，不要任何解释或 markdown。JSON schema: {"vote":0|1|2|3|4}。'
           },
           {
             role: 'user',
-            content: prompt
+            content: this.buildVotePrompt(context)
           }
         ]);
 
-        const parsed = this.parseJSONResponse(content);
-        if (parsed && typeof parsed.vote === 'number') {
-          const vote = parsed.vote;
-          // Validate vote is in valid range and targets alive player
-          if (vote === 0 || (vote >= 1 && vote <= 4 && context.aliveSeats.includes(vote as SeatNumber))) {
-            return vote;
-          }
+        const parsed = extractJsonObject(content);
+        const vote = validateVoteJson(parsed, context.aliveSeats);
+        if (vote === null) {
+          throw new Error('AI vote JSON schema validation failed');
         }
 
-        // Fallback: random vote among alive players
-        return this.getFallbackVote(context);
+        return vote;
       } catch (error) {
-        logger.error(error, 'AI vote generation failed, using fallback');
-        return this.getFallbackVote(context);
+        logger.warn({ err: error }, 'AI vote failed, fallback applied');
+        return this.fallbackVote(context);
       }
     });
+  }
+
+  private buildAdapter(): ModelAdapter | null {
+    if (!config.deepseekApiKey || !config.deepseekBaseUrl || !config.deepseekModel) {
+      return null;
+    }
+    if (!/^https?:\/\//i.test(config.deepseekBaseUrl)) {
+      return null;
+    }
+
+    return new DeepSeekAdapter(config.deepseekBaseUrl, config.deepseekApiKey, config.deepseekModel);
   }
 
   private buildSpeechPrompt(context: AIContext): string {
-    const speechesText = context.speeches
-      .filter(s => s.round === context.round)
-      .map(s => `座位${s.seat}: ${s.text}`)
+    const speechLog = context.speeches
+      .filter((item) => item.round === context.round)
+      .map((item) => `座位${item.seat}: ${item.text}`)
       .join('\n');
 
-    return `游戏信息：
-- 你是座位${context.mySeat}
-- 你的身份：${context.myRole === 'civilian' ? '平民' : '卧底'}
-- 你看到的词：${context.myWord}
-- 当前回合：第${context.round}轮
-- 存活的玩家座位：${context.aliveSeats.join(', ')}
-${speechesText ? `本轮已发言：\n${speechesText}` : '你是本轮第一个发言'}
-
-请生成简短发言（不超过30字），描述你看到的词。不要直接说出词，要隐晦地描述。`;
+    return [
+      `你是座位${context.mySeat}`,
+      `你的身份: ${context.myRole === 'civilian' ? '平民' : '卧底'}`,
+      `你看到的词: ${context.myWord}`,
+      `当前轮次: ${context.round}`,
+      `存活座位: ${context.aliveSeats.join(', ')}`,
+      speechLog ? `本轮已有发言:\n${speechLog}` : '你是本轮首个发言',
+      '请给出一句不超过30字的发言。'
+    ].join('\n');
   }
 
   private buildVotePrompt(context: AIContext): string {
-    const speechesText = context.speeches
-      .map(s => `座位${s.seat}: ${s.text}`)
+    const speechLog = context.speeches
+      .map((item) => `第${item.round}轮 座位${item.seat}: ${item.text}`)
       .join('\n');
 
-    return `游戏信息：
-- 你是座位${context.mySeat}
-- 你的身份：${context.myRole === 'civilian' ? '平民' : '卧底'}
-- 你看到的词：${context.myWord}
-- 当前回合：第${context.round}轮
-- 存活的玩家座位：${context.aliveSeats.join(', ')}
-
-所有发言记录：
-${speechesText}
-
-请投票给最可疑的玩家座位号（1-4），或0表示弃权。你只能投给存活的玩家。`;
+    return [
+      `你是座位${context.mySeat}`,
+      `你的身份: ${context.myRole === 'civilian' ? '平民' : '卧底'}`,
+      `你看到的词: ${context.myWord}`,
+      `当前轮次: ${context.round}`,
+      `存活座位: ${context.aliveSeats.join(', ')}`,
+      speechLog ? `公开发言记录:\n${speechLog}` : '暂无公开发言',
+      '请在存活玩家中投票，输出 1~4；或输出 0 表示弃权。'
+    ].join('\n');
   }
 
-  private getFallbackSpeech(context: AIContext): string {
-    const templates = context.myRole === 'civilian' 
-      ? fallbackSpeeches.civilian 
-      : fallbackSpeeches.undercover;
-    const template = templates[Math.floor(Math.random() * templates.length)];
-    return context.myRole === 'civilian' 
-      ? template.replace('{word}', context.myWord)
-      : template;
+  private fallbackSpeech(context: AIContext): string {
+    const list = context.myRole === 'civilian' ? fallbackCivilianSpeech : fallbackUndercoverSpeech;
+    return list[Math.floor(Math.random() * list.length)];
   }
 
-  private getFallbackVote(context: AIContext): number {
-    // Randomly vote for an alive player or abstain
-    if (Math.random() < 0.1) {
-      return 0; // 10% chance to abstain
-    }
-    const aliveOthers = context.aliveSeats.filter(s => s !== context.mySeat);
-    if (aliveOthers.length === 0) {
+  private fallbackVote(context: AIContext): VoteTarget {
+    const options = context.aliveSeats.filter((seat) => seat !== context.mySeat);
+    if (options.length === 0) {
       return 0;
     }
-    return aliveOthers[Math.floor(Math.random() * aliveOthers.length)];
+    return options[Math.floor(Math.random() * options.length)];
+  }
+
+  private logDisabledOnce(): void {
+    if (this.disabledLogged) {
+      return;
+    }
+    this.disabledLogged = true;
+    logger.warn('AI adapter disabled, fallback strategy will be used');
   }
 }
 

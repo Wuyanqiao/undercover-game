@@ -1,30 +1,16 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
-import fastify from 'fastify';
+import 'dotenv/config';
+import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import { config } from './config';
 import { logger } from './logger';
 import { redisClient } from './redis';
 import { setupSocketHandlers } from './socket/handlers';
 
-const app = fastify({
+const app = Fastify({
   logger: logger as any
 });
 
-const httpServer = createServer(app.server);
-const io = new SocketIOServer(httpServer, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  },
-  path: '/socket.io',
-  transports: ['websocket', 'polling']
-});
-
-// Health check endpoint
 app.get('/api/health', async () => {
   return {
     status: 'OK',
@@ -33,47 +19,49 @@ app.get('/api/health', async () => {
   };
 });
 
-async function start() {
-  try {
-    // Register CORS
-    await app.register(cors, {
+async function bootstrap(): Promise<void> {
+  await app.register(cors, {
+    origin: true,
+    credentials: true
+  });
+
+  await redisClient.ping();
+
+  const io = new SocketIOServer(app.server, {
+    path: '/socket.io',
+    cors: {
       origin: true,
-      credentials: true
-    });
+      methods: ['GET', 'POST']
+    },
+    transports: ['websocket', 'polling']
+  });
 
-    // Test Redis connection
-    await redisClient.ping();
-    logger.info('Redis connected successfully');
+  setupSocketHandlers(io);
 
-    // Setup Socket.IO handlers
-    setupSocketHandlers(io);
+  await app.listen({
+    host: '0.0.0.0',
+    port: config.port
+  });
 
-    // Start server
-    const port = config.port;
-    httpServer.listen(port, '0.0.0.0', () => {
-      logger.info(`Server listening on port ${port}`);
-    });
-  } catch (err) {
-    logger.error(err, 'Failed to start server');
-    process.exit(1);
-  }
+  logger.info({ port: config.port }, 'Backend started');
+
+  const shutdown = async (signal: string): Promise<void> => {
+    logger.info({ signal }, 'Shutting down');
+    await io.close();
+    await app.close();
+    await redisClient.quit();
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
+  process.on('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
 }
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  io.close();
-  httpServer.close();
-  await redisClient.quit();
-  process.exit(0);
+bootstrap().catch((error) => {
+  logger.error({ err: error }, 'Bootstrap failed');
+  process.exit(1);
 });
-
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  io.close();
-  httpServer.close();
-  await redisClient.quit();
-  process.exit(0);
-});
-
-start();

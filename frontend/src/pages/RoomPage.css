@@ -37,6 +37,22 @@
   cursor: pointer;
 }
 
+.btn-primary {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 6px;
+  background: #4a90d9;
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .leave-btn:hover {
   background: #d32f2f;
 }
@@ -157,7 +173,7 @@
   position: absolute;
   top: 10px;
   right: 10px;
-  background: #9c27b0;
+  background: #00796b;
   color: white;
   padding: 4px 8px;
   border-radius: 4px;

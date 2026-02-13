@@ -1,189 +1,261 @@
-import { create } from 'zustand'
-import { Socket, io } from 'socket.io-client'
+import { create } from 'zustand';
+import { io, Socket } from 'socket.io-client';
 
-export type GamePhase = 'LOBBY' | 'DEAL' | 'SPEAKING' | 'VOTING' | 'RESOLVE' | 'END'
+export type GamePhase = 'LOBBY' | 'DEAL' | 'SPEAKING' | 'VOTING' | 'RESOLVE' | 'END';
+export type Winner = 'civilian' | 'undercover';
+export type PlayerRole = 'civilian' | 'undercover';
 
-export type PlayerRole = 'civilian' | 'undercover'
-
-export interface Player {
-  seat: number
-  nickname: string
-  isAI: boolean
-  isAlive: boolean
+export interface VisiblePlayer {
+  seat: number;
+  nickname: string;
+  isAI: boolean;
+  isAlive: boolean;
+  connected: boolean;
 }
 
 export interface SpeechRecord {
-  seat: number
-  text: string
-  round: number
-  timestamp: number
+  seat: number;
+  text: string;
+  round: number;
+  ts: number;
 }
 
 export interface RoomState {
-  roomId: string
-  players: Player[]
-  phase: GamePhase
-  round: number
-  currentSpeaker?: number
-  speeches: SpeechRecord[]
-  mySeat?: number
-  myRole?: PlayerRole
-  myWord?: string
-  isHost: boolean
-  deadlineTs?: number
+  roomId: string;
+  players: VisiblePlayer[];
+  phase: GamePhase;
+  round: number;
+  currentSpeaker?: number;
+  speeches: SpeechRecord[];
+  mySeat?: number;
+  myRole?: PlayerRole;
+  myWord?: string;
+  isHost: boolean;
+  deadlineTs?: number;
+  tieBreakCandidates: number[];
 }
 
-interface GameStore {
-  socket: Socket | null
-  isConnected: boolean
-  error: string | null
-  roomState: RoomState | null
-  resumeToken: string | null
-  connect: () => void
-  disconnect: () => void
-  createRoom: (nickname: string) => void
-  joinRoom: (roomId: string, nickname: string) => void
-  restoreConnection: () => void
-  leaveRoom: () => void
-  startGame: () => void
-  speak: (text: string) => void
-  vote: (toSeat: number) => void
-  clearError: () => void
+export interface VoteResult {
+  tally: Record<string, number>;
+  eliminatedSeat: number | null;
+  round: number;
+  tie: boolean;
+  tieBreak: boolean;
 }
 
-const SOCKET_URL = window.location.origin
+export interface GameEndState {
+  winner: Winner;
+  reveal: {
+    rolesBySeat: Array<{
+      seat: number;
+      nickname: string;
+      role: PlayerRole;
+      isAlive: boolean;
+    }>;
+    words: {
+      civilian: string;
+      undercover: string;
+    };
+  };
+}
 
-export const useGameStore = create<GameStore>((set, get) => ({
+interface StoreState {
+  socket: Socket | null;
+  connected: boolean;
+  error: string | null;
+  nickname: string;
+  roomState: RoomState | null;
+  resumeToken: string | null;
+  voteResult: VoteResult | null;
+  gameEnd: GameEndState | null;
+  ensureSocket: () => void;
+  setNickname: (value: string) => void;
+  createRoom: (nickname?: string) => void;
+  joinRoom: (roomId: string, nickname?: string) => void;
+  leaveRoom: () => void;
+  startGame: () => void;
+  speak: (text: string) => void;
+  vote: (toSeat: number) => void;
+  clearError: () => void;
+}
+
+const SOCKET_PATH = '/socket.io';
+
+function normalizeNickname(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').slice(0, 12);
+}
+
+function normalizeRoomId(value: string): string {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+}
+
+export const useGameStore = create<StoreState>((set, get) => ({
   socket: null,
-  isConnected: false,
+  connected: false,
   error: null,
+  nickname: localStorage.getItem('nickname') ?? '',
   roomState: null,
   resumeToken: localStorage.getItem('resumeToken'),
+  voteResult: null,
+  gameEnd: null,
 
-  connect: () => {
-    const socket = io(SOCKET_URL, {
-      path: '/socket.io',
-      transports: ['websocket', 'polling']
-    })
+  ensureSocket: () => {
+    const existing = get().socket;
+    if (existing) {
+      return;
+    }
+
+    const socket = io(window.location.origin, {
+      path: SOCKET_PATH,
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000
+    });
 
     socket.on('connect', () => {
-      console.log('Connected to server')
-      set({ isConnected: true, error: null })
-    })
+      set({ connected: true, error: null });
+      const token = get().resumeToken;
+      if (token) {
+        socket.emit('room:resume', { token });
+      }
+    });
 
     socket.on('disconnect', () => {
-      console.log('Disconnected from server')
-      set({ isConnected: false })
-    })
+      set({ connected: false });
+    });
 
-    socket.on('connect_error', (err) => {
-      console.error('Connection error:', err)
-      set({ error: '连接服务器失败，请刷新页面重试' })
-    })
+    socket.on('connect_error', () => {
+      set({ error: '连接失败，正在自动重试...' });
+    });
 
-    socket.on('room:state', (state: RoomState) => {
-      set({ roomState: state })
-    })
+    socket.on('room:error', (payload: { message: string }) => {
+      set({ error: payload.message });
+    });
 
-    socket.on('room:error', ({ message, code }: { message: string; code: string }) => {
-      console.error('Room error:', code, message)
-      set({ error: message })
-    })
+    socket.on('room:joined', (payload: { roomId: string; resumeToken: string }) => {
+      localStorage.setItem('resumeToken', payload.resumeToken);
+      set({
+        resumeToken: payload.resumeToken,
+        error: null,
+        voteResult: null,
+        gameEnd: null
+      });
+    });
 
-    socket.on('room:joined', ({ resumeToken }: { resumeToken: string }) => {
-      localStorage.setItem('resumeToken', resumeToken)
-      set({ resumeToken })
-    })
+    socket.on('room:state', (payload: RoomState) => {
+      set({ roomState: payload });
+    });
 
-    socket.on('game:speech', ({ seat, text, round }: SpeechRecord & { round: number }) => {
-      const { roomState } = get()
-      if (roomState) {
-        set({
-          roomState: {
-            ...roomState,
-            speeches: [...roomState.speeches, { seat, text, round, timestamp: Date.now() }]
-          }
-        })
+    socket.on('game:phase', (payload: { phase: GamePhase; round: number; deadlineTs?: number }) => {
+      const state = get().roomState;
+      if (!state) {
+        return;
       }
-    })
+      set({
+        roomState: {
+          ...state,
+          phase: payload.phase,
+          round: payload.round,
+          deadlineTs: payload.deadlineTs
+        }
+      });
+    });
 
-    socket.on('game:end', ({ winner, reveal }: { winner: 'civilian' | 'undercover'; reveal: any }) => {
-      const { roomState } = get()
-      if (roomState) {
-        set({
-          roomState: {
-            ...roomState,
-            phase: 'END'
-          }
-        })
-        // Store reveal info in a way that can be displayed
-        ;(window as any).gameReveal = reveal
-      }
-    })
+    socket.on('game:vote:result', (payload: VoteResult) => {
+      set({ voteResult: payload });
+    });
 
-    set({ socket })
+    socket.on('game:end', (payload: GameEndState) => {
+      set({ gameEnd: payload });
+    });
+
+    set({ socket });
   },
 
-  disconnect: () => {
-    const { socket } = get()
-    if (socket) {
-      socket.disconnect()
-      set({ socket: null, isConnected: false })
-    }
+  setNickname: (value: string) => {
+    const nickname = normalizeNickname(value);
+    localStorage.setItem('nickname', nickname);
+    set({ nickname });
   },
 
-  createRoom: (nickname: string) => {
-    const { socket } = get()
-    if (socket) {
-      socket.emit('room:create', { nickname })
+  createRoom: (nicknameInput?: string) => {
+    const socket = get().socket;
+    if (!socket) {
+      return;
     }
+
+    const nickname = normalizeNickname(nicknameInput ?? get().nickname);
+    if (!nickname) {
+      set({ error: '请输入昵称' });
+      return;
+    }
+
+    get().setNickname(nickname);
+    socket.emit('room:create', { nickname });
   },
 
-  joinRoom: (roomId: string, nickname: string) => {
-    const { socket } = get()
-    if (socket) {
-      socket.emit('room:join', { roomId: roomId.toUpperCase(), nickname })
+  joinRoom: (roomIdInput: string, nicknameInput?: string) => {
+    const socket = get().socket;
+    if (!socket) {
+      return;
     }
-  },
 
-  restoreConnection: () => {
-    const { socket, resumeToken } = get()
-    if (socket && resumeToken) {
-      socket.emit('room:resume', { token: resumeToken })
+    const roomId = normalizeRoomId(roomIdInput);
+    const nickname = normalizeNickname(nicknameInput ?? get().nickname);
+
+    if (!roomId) {
+      set({ error: '请输入正确的房间号' });
+      return;
     }
+    if (!nickname) {
+      set({ error: '请输入昵称' });
+      return;
+    }
+
+    get().setNickname(nickname);
+    socket.emit('room:join', { roomId, nickname });
   },
 
   leaveRoom: () => {
-    const { socket } = get()
+    const socket = get().socket;
     if (socket) {
-      socket.emit('room:leave')
-      localStorage.removeItem('resumeToken')
-      set({ roomState: null, resumeToken: null })
+      socket.emit('room:leave', {});
     }
+    localStorage.removeItem('resumeToken');
+    set({
+      roomState: null,
+      resumeToken: null,
+      voteResult: null,
+      gameEnd: null
+    });
   },
 
   startGame: () => {
-    const { socket } = get()
-    if (socket) {
-      socket.emit('game:start')
+    const socket = get().socket;
+    if (!socket) {
+      return;
     }
+    socket.emit('game:start', {});
   },
 
   speak: (text: string) => {
-    const { socket } = get()
-    if (socket) {
-      socket.emit('game:speak', { text })
+    const socket = get().socket;
+    if (!socket) {
+      return;
     }
+    socket.emit('game:speak', { text: text.trim() });
   },
 
   vote: (toSeat: number) => {
-    const { socket } = get()
-    if (socket) {
-      socket.emit('game:vote', { toSeat })
+    const socket = get().socket;
+    if (!socket) {
+      return;
     }
+    socket.emit('game:vote', { toSeat });
   },
 
   clearError: () => {
-    set({ error: null })
+    set({ error: null });
   }
-}))
+}));

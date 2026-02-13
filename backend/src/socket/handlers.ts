@@ -1,558 +1,923 @@
-import { Server, Socket } from 'socket.io';
+import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
-import { Room, Player, SeatNumber, GamePhase } from '../types';
-import { config } from '../config';
-import { logger } from '../logger';
-import { redisClient, storeResumeToken, getResumeTokenData, deleteResumeToken, incrementActiveRooms } from '../redis';
+import { Server, Socket } from 'socket.io';
 import { aiClient } from '../ai/client';
-import * as GameLogic from '../game/logic';
+import { config } from '../config';
+import * as Game from '../game/logic';
+import { logger } from '../logger';
+import {
+  countActiveRooms,
+  deleteResumeRecord,
+  deleteRoom,
+  loadResumeRecord,
+  loadRoom,
+  saveResumeRecord,
+  saveRoom
+} from '../redis';
+import { AIContext, GameEndPayload, RoomState, SeatNumber, VoteTarget, VoteResultPayload } from '../types';
 
-// In-memory room cache (short-term)
-const rooms = new Map<string, Room>();
-const socketToRoom = new Map<string, { roomId: string; seat: SeatNumber }>();
+interface SocketSession {
+  roomId: string;
+  seat: SeatNumber;
+}
 
-// Rate limiting
-const socketMessageCounts = new Map<string, { count: number; resetTime: number }>();
+interface RateWindow {
+  count: number;
+  resetAt: number;
+}
 
-function checkRateLimit(socketId: string): boolean {
-  const now = Date.now();
-  const limit = { max: 3, window: 2000 }; // 3 messages per 2 seconds
-  
-  let record = socketMessageCounts.get(socketId);
-  if (!record || now > record.resetTime) {
-    record = { count: 1, resetTime: now + limit.window };
-    socketMessageCounts.set(socketId, record);
+interface ResumeTokenPayload extends jwt.JwtPayload {
+  roomId: string;
+  seat: SeatNumber;
+  nickname: string;
+  jti: string;
+}
+
+const roomCache = new Map<string, RoomState>();
+const roomTimers = new Map<string, NodeJS.Timeout>();
+const socketSessions = new Map<string, SocketSession>();
+const rateWindows = new Map<string, RateWindow>();
+const aiSpeakingLocks = new Set<string>();
+const aiVotingLocks = new Set<string>();
+
+const RATE_LIMIT_WINDOW_MS = 2000;
+const RATE_LIMIT_MAX = 3;
+const ROOM_IDLE_DESTROY_MS = config.roomTimeoutMinutes * 60 * 1000;
+
+const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function roomChannel(roomId: string): string {
+  return `room:${roomId}`;
+}
+
+function now(): number {
+  return Date.now();
+}
+
+function normalizeRoomId(input: string): string {
+  return input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+}
+
+function normalizeNickname(input: string): string {
+  return Game.sanitizeNickname(input ?? '');
+}
+
+function allowSocketMessage(socketId: string): boolean {
+  const record = rateWindows.get(socketId);
+  const currentTs = now();
+  if (!record || currentTs >= record.resetAt) {
+    rateWindows.set(socketId, {
+      count: 1,
+      resetAt: currentTs + RATE_LIMIT_WINDOW_MS
+    });
     return true;
   }
 
-  if (record.count >= limit.max) {
+  if (record.count >= RATE_LIMIT_MAX) {
     return false;
   }
 
-  record.count++;
+  record.count += 1;
   return true;
 }
 
-function generateRoomId(): string {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
+function emitError(socket: Socket, message: string, code: string): void {
+  socket.emit('room:error', { message, code });
 }
 
-function generateResumeToken(roomId: string, seat: SeatNumber, nickname: string): string {
-  const token = jwt.sign(
-    { roomId, seat, nickname, jti: uuidv4() },
-    config.jwtSecret,
-    { expiresIn: '1h' }
-  );
-  storeResumeToken(token, roomId, seat, nickname);
-  return token;
-}
-
-async function saveRoomToRedis(room: Room): Promise<void> {
-  await redisClient.setex(
-    `room:${room.id}`,
-    600, // 10 minutes expiry
-    JSON.stringify({
-      ...room,
-      players: Array.from(room.players.entries()),
-      votes: Array.from(room.votes.entries())
-    })
-  );
-}
-
-async function loadRoomFromRedis(roomId: string): Promise<Room | null> {
-  const data = await redisClient.get(`room:${roomId}`);
-  if (!data) return null;
-
-  const parsed = JSON.parse(data);
-  const room: Room = {
-    ...parsed,
-    players: new Map(parsed.players),
-    votes: new Map(parsed.votes)
-  };
-  return room;
-}
-
-async function broadcastRoomState(room: Room): Promise<void> {
-  await saveRoomToRedis(room);
-  
-  // Get all sockets in this room
-  const roomSockets = Array.from(socketToRoom.entries())
-    .filter(([, data]) => data.roomId === room.id)
-    .map(([socketId]) => socketId);
-
-  for (const socketId of roomSockets) {
-    const socketData = socketToRoom.get(socketId);
-    if (socketData) {
-      const ioServer = global.io as Server;
-      const socket = ioServer.sockets.sockets.get(socketId);
-      if (socket) {
-        socket.emit('room:state', GameLogic.getVisibleState(room, socketData.seat));
-      }
-    }
+function generateRoomCode(): string {
+  let code = '';
+  for (let i = 0; i < 6; i += 1) {
+    code += ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)];
   }
+  return code;
 }
 
-async function handleAIActions(room: Room, io: Server): Promise<void> {
-  if (room.phase === 'SPEAKING' && room.currentSpeaker) {
-    const player = room.players.get(room.currentSpeaker);
-    if (player?.isAI && player.isAlive) {
-      // AI speaks
-      try {
-        const speech = await aiClient.generateSpeech({
-          mySeat: player.seat,
-          myRole: player.role!,
-          myWord: player.word!,
-          round: room.round,
-          speeches: room.speeches,
-          aliveSeats: GameLogic.getAliveSeats(room)
-        });
-
-        GameLogic.recordSpeech(room, player.seat, speech);
-        io.to(`room:${room.id}`).emit('game:speech', {
-          seat: player.seat,
-          text: speech,
-          round: room.round
-        });
-
-        // Move to next speaker
-        const nextSpeaker = GameLogic.getNextSpeaker(room);
-        if (nextSpeaker) {
-          room.currentSpeaker = nextSpeaker;
-          room.deadlineTs = Date.now() + config.speechTimeoutSeconds * 1000;
-          await broadcastRoomState(room);
-          
-          // Recursively handle if next is also AI
-          setTimeout(() => handleAIActions(room, io), 1000);
-        } else {
-          // End speaking phase
-          room.deadlineTs = Date.now() + config.voteTimeoutSeconds * 1000;
-          GameLogic.startVotingPhase(room);
-          await broadcastRoomState(room);
-          
-          // Trigger AI votes
-          setTimeout(() => handleAIVoting(room, io), 1000);
-        }
-      } catch (error) {
-        logger.error(error, 'AI speech error');
-      }
-    }
-  }
-}
-
-async function handleAIVoting(room: Room, io: Server): Promise<void> {
-  if (room.phase !== 'VOTING') return;
-
-  const alivePlayers = GameLogic.getAlivePlayers(room);
-  const aiPlayers = alivePlayers.filter(p => p.isAI);
-
-  for (const ai of aiPlayers) {
-    // Check if already voted
-    if (room.votes.has(ai.seat)) continue;
-
-    try {
-      const vote = await aiClient.generateVote({
-        mySeat: ai.seat,
-        myRole: ai.role!,
-        myWord: ai.word!,
-        round: room.round,
-        speeches: room.speeches,
-        aliveSeats: GameLogic.getAliveSeats(room)
-      });
-
-      GameLogic.recordVote(room, ai.seat, vote as SeatNumber);
-    } catch (error) {
-      logger.error(error, 'AI vote error');
-      // AI abstains on error
-      GameLogic.recordVote(room, ai.seat, 0);
-    }
-  }
-
-  await broadcastRoomState(room);
-
-  // Check if all alive players have voted
-  const votedCount = Array.from(room.votes.keys()).filter(
-    seat => room.players.get(seat)?.isAlive
-  ).length;
-  
-  if (votedCount >= alivePlayers.length) {
-    await resolveVoting(room, io);
-  }
-}
-
-async function resolveVoting(room: Room, io: Server, isTiebreak = false): Promise<void> {
-  const result = GameLogic.calculateVoteResult(room);
-
-  io.to(`room:${room.id}`).emit('game:vote:result', {
-    tally: Array.from(result.tally.entries()),
-    eliminatedSeat: result.eliminatedSeat,
+function emitPhase(io: Server, room: RoomState): void {
+  io.to(roomChannel(room.id)).emit('game:phase', {
+    phase: room.phase,
     round: room.round,
-    isTiebreak
+    deadlineTs: room.deadlineTs
   });
+}
 
-  if (result.isTie) {
-    // Tiebreak vote
-    room.votes.clear();
-    room.deadlineTs = Date.now() + config.tiebreakTimeoutSeconds * 1000;
-    await broadcastRoomState(room);
-    
-    // Trigger AI votes for tiebreak
-    setTimeout(() => handleAIVoting(room, io), 1000);
+async function getRoom(roomId: string): Promise<RoomState | null> {
+  const cached = roomCache.get(roomId);
+  if (cached) {
+    return cached;
+  }
+
+  const loaded = await loadRoom(roomId);
+  if (!loaded) {
+    return null;
+  }
+
+  roomCache.set(roomId, loaded);
+  return loaded;
+}
+
+async function persistRoom(room: RoomState): Promise<void> {
+  roomCache.set(room.id, room);
+  await saveRoom(room);
+}
+
+async function emitRoomState(io: Server, room: RoomState): Promise<void> {
+  const sockets = io.sockets.adapter.rooms.get(roomChannel(room.id));
+  if (!sockets) {
     return;
   }
 
-  if (result.eliminatedSeat) {
-    GameLogic.eliminatePlayer(room, result.eliminatedSeat);
-    
-    // Check game end
-    const endCheck = GameLogic.checkGameEnd(room);
-    if (endCheck.ended) {
-      GameLogic.endGame(room);
-      
-      // Reveal all info
-      const reveal = {
-        rolesBySeat: Array.from(room.players.entries()).map(([seat, p]) => ({
-          seat,
-          role: p.role,
-          isAlive: p.isAlive
-        })),
-        words: {
-          civilian: room.civilianWord,
-          undercover: room.undercoverWord
-        }
-      };
+  for (const socketId of sockets) {
+    const session = socketSessions.get(socketId);
+    if (!session || session.roomId !== room.id) {
+      continue;
+    }
+    const socket = io.sockets.sockets.get(socketId);
+    if (!socket) {
+      continue;
+    }
 
-      io.to(`room:${room.id}`).emit('game:end', {
-        winner: endCheck.winner,
-        reveal
-      });
-    } else {
-      // Next round
-      GameLogic.advanceRound(room);
-      room.deadlineTs = Date.now() + config.speechTimeoutSeconds * 1000;
-      
-      // Trigger AI speech if first speaker is AI
-      setTimeout(() => handleAIActions(room, io), 1000);
+    socket.emit('room:state', Game.buildVisibleState(room, session.seat));
+  }
+}
+
+async function syncAndBroadcast(io: Server, room: RoomState, emitPhaseEvent = false): Promise<void> {
+  await persistRoom(room);
+  await emitRoomState(io, room);
+  if (emitPhaseEvent) {
+    emitPhase(io, room);
+  }
+}
+
+function clearRoomTimer(roomId: string): void {
+  const timer = roomTimers.get(roomId);
+  if (timer) {
+    clearTimeout(timer);
+    roomTimers.delete(roomId);
+  }
+}
+
+function scheduleRoomDeadline(io: Server, room: RoomState): void {
+  clearRoomTimer(room.id);
+
+  if (!room.deadlineTs) {
+    return;
+  }
+
+  const delay = Math.max(10, room.deadlineTs - now());
+  const timer = setTimeout(() => {
+    void onRoomDeadline(io, room.id);
+  }, delay);
+  roomTimers.set(room.id, timer);
+}
+
+function clearPendingDestroy(room: RoomState): void {
+  if (room.pendingDestroyAt) {
+    room.pendingDestroyAt = undefined;
+  }
+}
+
+function refreshPendingDestroy(room: RoomState): void {
+  if (Game.getHumanCount(room) === 0) {
+    if (!room.pendingDestroyAt) {
+      room.pendingDestroyAt = now() + ROOM_IDLE_DESTROY_MS;
+    }
+    return;
+  }
+  room.pendingDestroyAt = undefined;
+}
+
+async function destroyRoom(io: Server, roomId: string): Promise<void> {
+  clearRoomTimer(roomId);
+
+  const sockets = io.sockets.adapter.rooms.get(roomChannel(roomId));
+  if (sockets) {
+    for (const socketId of sockets) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        emitError(socket, '房间已关闭', 'ROOM_CLOSED');
+        socket.leave(roomChannel(roomId));
+      }
+      socketSessions.delete(socketId);
     }
   }
 
-  await broadcastRoomState(room);
+  roomCache.delete(roomId);
+  await deleteRoom(roomId);
+}
+
+function buildAIContext(room: RoomState, seat: SeatNumber): AIContext {
+  const player = Game.getPlayer(room, seat);
+  if (!player || !player.role || !player.word) {
+    throw new Error(`AI context missing role/word for seat ${seat}`);
+  }
+
+  return {
+    mySeat: seat,
+    myRole: player.role,
+    myWord: player.word,
+    round: room.round,
+    speeches: room.speeches,
+    aliveSeats: Game.getAliveSeats(room)
+  };
+}
+
+async function issueResumeToken(
+  room: RoomState,
+  seat: SeatNumber,
+  nickname: string,
+  socketId: string
+): Promise<string> {
+  const player = Game.getPlayer(room, seat);
+  if (!player) {
+    throw new Error('Cannot issue token: player missing');
+  }
+
+  if (player.resumeJti) {
+    await deleteResumeRecord(player.resumeJti);
+  }
+
+  const jti = randomUUID();
+  const token = jwt.sign(
+    {
+      roomId: room.id,
+      seat,
+      nickname,
+      jti
+    },
+    config.jwtSecret,
+    { expiresIn: '1h' }
+  );
+
+  player.resumeJti = jti;
+  await saveResumeRecord(jti, {
+    roomId: room.id,
+    seat,
+    nickname,
+    activeSocketId: socketId
+  });
+
+  return token;
+}
+
+function verifyResumeToken(rawToken: string): ResumeTokenPayload | null {
+  try {
+    const decoded = jwt.verify(rawToken, config.jwtSecret);
+    if (!decoded || typeof decoded !== 'object') {
+      return null;
+    }
+
+    const payload = decoded as ResumeTokenPayload;
+    if (!payload.roomId || !payload.seat || !payload.jti || !payload.nickname) {
+      return null;
+    }
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function bindSocketToRoom(socket: Socket, room: RoomState, seat: SeatNumber): void {
+  socketSessions.set(socket.id, { roomId: room.id, seat });
+  socket.join(roomChannel(room.id));
+  Game.markPlayerConnected(room, seat, socket.id);
+}
+
+function unbindSocket(socket: Socket): SocketSession | null {
+  const session = socketSessions.get(socket.id);
+  if (!session) {
+    return null;
+  }
+
+  socketSessions.delete(socket.id);
+  socket.leave(roomChannel(session.roomId));
+  return session;
+}
+
+async function beginVoting(io: Server, room: RoomState, candidates: SeatNumber[] = []): Promise<void> {
+  Game.beginVotingPhase(room, candidates);
+  room.deadlineTs = now() + (candidates.length > 0 ? config.tiebreakTimeoutSeconds : config.voteTimeoutSeconds) * 1000;
+
+  await syncAndBroadcast(io, room, true);
+  scheduleRoomDeadline(io, room);
+  await processAIVotes(io, room.id);
+}
+
+async function submitSpeech(io: Server, room: RoomState, seat: SeatNumber, text: string): Promise<void> {
+  if (room.phase !== 'SPEAKING' || room.currentSpeaker !== seat) {
+    return;
+  }
+
+  const speech = Game.appendSpeech(room, seat, text);
+  io.to(roomChannel(room.id)).emit('game:speech', {
+    seat: speech.seat,
+    text: speech.text,
+    round: speech.round
+  });
+
+  const nextSpeaker = Game.moveToNextSpeaker(room);
+  if (nextSpeaker) {
+    room.deadlineTs = now() + config.speechTimeoutSeconds * 1000;
+    await syncAndBroadcast(io, room, true);
+    scheduleRoomDeadline(io, room);
+    await processAISpeaking(io, room.id);
+    return;
+  }
+
+  await beginVoting(io, room);
+}
+
+async function resolveVoting(io: Server, room: RoomState): Promise<void> {
+  if (room.phase !== 'VOTING') {
+    return;
+  }
+
+  room.phase = 'RESOLVE';
+  room.deadlineTs = undefined;
+  await syncAndBroadcast(io, room, true);
+  clearRoomTimer(room.id);
+
+  const { tally, topSeats } = Game.tallyVotes(room);
+  const inTieBreak = room.tieBreak.active;
+
+  if (topSeats.length > 1 && !inTieBreak) {
+    const tiePayload: VoteResultPayload = {
+      tally,
+      eliminatedSeat: null,
+      round: room.round,
+      tie: true,
+      tieBreak: false
+    };
+    io.to(roomChannel(room.id)).emit('game:vote:result', tiePayload);
+
+    await beginVoting(io, room, topSeats);
+    return;
+  }
+
+  let eliminatedSeat: SeatNumber;
+  if (topSeats.length > 1) {
+    eliminatedSeat = topSeats[Math.floor(Math.random() * topSeats.length)];
+  } else {
+    const fallbackSeat = Game.getAliveSeats(room)[0];
+    if (!topSeats[0] && !fallbackSeat) {
+      return;
+    }
+    eliminatedSeat = (topSeats[0] ?? fallbackSeat) as SeatNumber;
+  }
+
+  Game.eliminatePlayer(room, eliminatedSeat);
+
+  const resultPayload: VoteResultPayload = {
+    tally,
+    eliminatedSeat,
+    round: room.round,
+    tie: topSeats.length > 1,
+    tieBreak: inTieBreak
+  };
+  io.to(roomChannel(room.id)).emit('game:vote:result', resultPayload);
+
+  const winner = Game.checkWinner(room);
+  if (winner) {
+    Game.beginEndPhase(room, winner);
+    await syncAndBroadcast(io, room, true);
+
+    const gameEnd: GameEndPayload = {
+      winner,
+      reveal: Game.buildReveal(room)
+    };
+    io.to(roomChannel(room.id)).emit('game:end', gameEnd);
+    return;
+  }
+
+  Game.beginSpeakingPhase(room, room.round + 1);
+  room.deadlineTs = now() + config.speechTimeoutSeconds * 1000;
+  await syncAndBroadcast(io, room, true);
+  scheduleRoomDeadline(io, room);
+  await processAISpeaking(io, room.id);
+}
+
+async function processAISpeaking(io: Server, roomId: string): Promise<void> {
+  if (aiSpeakingLocks.has(roomId)) {
+    return;
+  }
+  aiSpeakingLocks.add(roomId);
+
+  try {
+    while (true) {
+      const room = await getRoom(roomId);
+      if (!room || room.phase !== 'SPEAKING' || !room.currentSpeaker) {
+        break;
+      }
+
+      const player = Game.getPlayer(room, room.currentSpeaker);
+      if (!player || !player.isAlive || !player.isAI) {
+        break;
+      }
+
+      let speech = '我先说一个模糊线索。';
+      try {
+        speech = await aiClient.generateSpeech(buildAIContext(room, player.seat));
+      } catch (error) {
+        logger.warn({ err: error, roomId, seat: player.seat }, 'AI speech failed, fallback used');
+      }
+
+      await submitSpeech(io, room, player.seat, speech);
+    }
+  } finally {
+    aiSpeakingLocks.delete(roomId);
+  }
+}
+
+async function processAIVotes(io: Server, roomId: string): Promise<void> {
+  if (aiVotingLocks.has(roomId)) {
+    return;
+  }
+  aiVotingLocks.add(roomId);
+
+  try {
+    const room = await getRoom(roomId);
+    if (!room || room.phase !== 'VOTING') {
+      return;
+    }
+
+    const alivePlayers = Game.getAlivePlayers(room);
+    for (const player of alivePlayers) {
+      if (!player.isAI) {
+        continue;
+      }
+      if (room.votes[player.seat] !== undefined) {
+        continue;
+      }
+
+      let vote: VoteTarget = 0;
+      try {
+        vote = await aiClient.generateVote(buildAIContext(room, player.seat));
+      } catch (error) {
+        logger.warn({ err: error, roomId, seat: player.seat }, 'AI vote failed, fallback used');
+      }
+
+      if (!Game.isValidVoteTarget(room, vote)) {
+        vote = 0;
+      }
+
+      Game.recordVote(room, player.seat, vote);
+    }
+
+    await syncAndBroadcast(io, room);
+
+    if (Game.allAlivePlayersVoted(room)) {
+      await resolveVoting(io, room);
+    }
+  } finally {
+    aiVotingLocks.delete(roomId);
+  }
+}
+
+async function onRoomDeadline(io: Server, roomId: string): Promise<void> {
+  const room = await getRoom(roomId);
+  if (!room || !room.deadlineTs) {
+    return;
+  }
+  if (room.deadlineTs > now() + 50) {
+    scheduleRoomDeadline(io, room);
+    return;
+  }
+
+  if (room.phase === 'SPEAKING' && room.currentSpeaker) {
+    const player = Game.getPlayer(room, room.currentSpeaker);
+    if (player?.isAI) {
+      await processAISpeaking(io, roomId);
+    } else {
+      await submitSpeech(io, room, room.currentSpeaker, '（超时）');
+    }
+    return;
+  }
+
+  if (room.phase === 'VOTING') {
+    for (const seat of Game.getAliveSeats(room)) {
+      if (room.votes[seat] === undefined) {
+        Game.recordVote(room, seat, 0);
+      }
+    }
+
+    await syncAndBroadcast(io, room);
+    await resolveVoting(io, room);
+  }
+}
+
+async function createUniqueRoomId(): Promise<string | null> {
+  for (let i = 0; i < 20; i += 1) {
+    const candidate = generateRoomCode();
+    if (roomCache.has(candidate)) {
+      continue;
+    }
+    const existing = await loadRoom(candidate);
+    if (!existing) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 export function setupSocketHandlers(io: Server): void {
-  global.io = io;
-
   io.on('connection', (socket: Socket) => {
-    logger.info({ socketId: socket.id }, 'Client connected');
+    logger.info({ socketId: socket.id }, 'Socket connected');
 
-    // Handle resume with token
-    socket.on('room:resume', async ({ token }: { token: string }) => {
-      try {
-        const tokenData = await getResumeTokenData(token);
-        if (!tokenData) {
-          socket.emit('room:error', { message: '恢复令牌已过期', code: 'TOKEN_EXPIRED' });
-          return;
-        }
-
-        const room = await loadRoomFromRedis(tokenData.roomId);
-        if (!room) {
-          socket.emit('room:error', { message: '房间不存在', code: 'ROOM_NOT_FOUND' });
-          return;
-        }
-
-        // Update player's socket
-        const player = room.players.get(tokenData.seat);
-        if (player && !player.isAI) {
-          player.socketId = socket.id;
-          rooms.set(room.id, room);
-          socketToRoom.set(socket.id, { roomId: room.id, seat: tokenData.seat });
-          socket.join(`room:${room.id}`);
-
-          // Delete old token and issue new one
-          await deleteResumeToken(token);
-          const newToken = generateResumeToken(room.id, tokenData.seat, tokenData.nickname);
-
-          socket.emit('room:joined', { 
-            roomId: room.id, 
-            seat: tokenData.seat, 
-            resumeToken: newToken 
-          });
-          socket.emit('room:state', GameLogic.getVisibleState(room, tokenData.seat));
-          await broadcastRoomState(room);
-        }
-      } catch (error) {
-        logger.error(error, 'Resume error');
-        socket.emit('room:error', { message: '恢复失败', code: 'RESUME_ERROR' });
+    socket.on('room:create', async (payload: { nickname?: string }) => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
+        return;
       }
+
+      if (socketSessions.has(socket.id)) {
+        emitError(socket, '你已经在房间中，请先离开', 'ALREADY_IN_ROOM');
+        return;
+      }
+
+      const nickname = normalizeNickname(payload.nickname ?? '');
+      if (!nickname) {
+        emitError(socket, '昵称不能为空', 'INVALID_NICKNAME');
+        return;
+      }
+
+      const activeRoomCount = await countActiveRooms();
+      if (activeRoomCount >= config.maxRooms) {
+        emitError(socket, '当前房间数已达上限，请稍后再试', 'ROOM_LIMIT');
+        return;
+      }
+
+      const roomId = await createUniqueRoomId();
+      if (!roomId) {
+        emitError(socket, '创建房间失败，请稍后重试', 'ROOM_CREATE_FAILED');
+        return;
+      }
+
+      const room = Game.createRoom(roomId, nickname, socket.id);
+      clearPendingDestroy(room);
+      bindSocketToRoom(socket, room, 1);
+
+      const token = await issueResumeToken(room, 1, nickname, socket.id);
+      await syncAndBroadcast(io, room, true);
+
+      socket.emit('room:joined', {
+        roomId,
+        seat: 1,
+        resumeToken: token
+      });
     });
 
-    // Create room
-    socket.on('room:create', async ({ nickname }: { nickname: string }) => {
-      if (!checkRateLimit(socket.id)) {
-        socket.emit('room:error', { message: '操作过于频繁', code: 'RATE_LIMIT' });
+    socket.on('room:join', async (payload: { roomId?: string; nickname?: string }) => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
         return;
       }
 
-      // Check room limit
-      const canCreate = await incrementActiveRooms();
-      if (!canCreate) {
-        socket.emit('room:error', { message: '服务器房间已满，请稍后再试', code: 'ROOM_LIMIT' });
+      if (socketSessions.has(socket.id)) {
+        emitError(socket, '你已经在房间中，请先离开', 'ALREADY_IN_ROOM');
         return;
       }
 
-      const roomId = generateRoomId();
-      const room = GameLogic.createRoom(roomId, nickname);
-      
-      const player = room.players.get(1)!;
-      player.socketId = socket.id;
-
-      rooms.set(roomId, room);
-      socketToRoom.set(socket.id, { roomId, seat: 1 });
-      socket.join(`room:${roomId}`);
-
-      const resumeToken = generateResumeToken(roomId, 1, nickname);
-      await saveRoomToRedis(room);
-
-      socket.emit('room:created', { roomId });
-      socket.emit('room:joined', { roomId, seat: 1, resumeToken });
-      socket.emit('room:state', GameLogic.getVisibleState(room, 1));
-    });
-
-    // Join room
-    socket.on('room:join', async ({ roomId, nickname }: { roomId: string; nickname: string }) => {
-      if (!checkRateLimit(socket.id)) {
-        socket.emit('room:error', { message: '操作过于频繁', code: 'RATE_LIMIT' });
+      const roomId = normalizeRoomId(payload.roomId ?? '');
+      const nickname = normalizeNickname(payload.nickname ?? '');
+      if (!roomId) {
+        emitError(socket, '房间号格式错误', 'INVALID_ROOM_ID');
+        return;
+      }
+      if (!nickname) {
+        emitError(socket, '昵称不能为空', 'INVALID_NICKNAME');
         return;
       }
 
-      let room = rooms.get(roomId) || await loadRoomFromRedis(roomId);
-      
+      const room = await getRoom(roomId);
       if (!room) {
-        socket.emit('room:error', { message: '房间不存在', code: 'ROOM_NOT_FOUND' });
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
         return;
       }
-
       if (room.phase !== 'LOBBY') {
-        socket.emit('room:error', { message: '游戏已经开始', code: 'GAME_STARTED' });
+        emitError(socket, '游戏已开始，无法加入', 'GAME_ALREADY_STARTED');
         return;
       }
 
-      const player = GameLogic.addPlayer(room, nickname, socket.id);
+      const player = Game.addHumanPlayer(room, nickname, socket.id);
       if (!player) {
-        socket.emit('room:error', { message: '房间已满', code: 'ROOM_FULL' });
+        emitError(socket, '房间已满', 'ROOM_FULL');
         return;
       }
 
-      rooms.set(roomId, room);
-      socketToRoom.set(socket.id, { roomId, seat: player.seat });
-      socket.join(`room:${roomId}`);
+      clearPendingDestroy(room);
+      bindSocketToRoom(socket, room, player.seat);
 
-      const resumeToken = generateResumeToken(roomId, player.seat, nickname);
-      await saveRoomToRedis(room);
+      const token = await issueResumeToken(room, player.seat, nickname, socket.id);
+      await syncAndBroadcast(io, room);
 
-      socket.emit('room:joined', { roomId, seat: player.seat, resumeToken });
-      socket.emit('room:state', GameLogic.getVisibleState(room, player.seat));
-      await broadcastRoomState(room);
+      socket.emit('room:joined', {
+        roomId,
+        seat: player.seat,
+        resumeToken: token
+      });
     });
 
-    // Leave room
-    socket.on('room:leave', async () => {
-      const data = socketToRoom.get(socket.id);
-      if (!data) return;
+    socket.on('room:resume', async (payload: { token?: string }) => {
+      const token = payload.token ?? '';
+      const decoded = verifyResumeToken(token);
+      if (!decoded) {
+        emitError(socket, '重连令牌无效', 'RESUME_TOKEN_INVALID');
+        return;
+      }
 
-      const { roomId, seat } = data;
-      const room = rooms.get(roomId);
-      
-      if (room) {
-        GameLogic.removePlayer(room, seat);
-        
-        // If no human players left, schedule room deletion
-        const humanPlayers = Array.from(room.players.values()).filter(p => !p.isAI);
-        if (humanPlayers.length === 0) {
-          rooms.delete(roomId);
-          await redisClient.del(`room:${roomId}`);
-        } else {
-          await broadcastRoomState(room);
-          await saveRoomToRedis(room);
+      const stored = await loadResumeRecord(decoded.jti);
+      if (!stored || stored.roomId !== decoded.roomId || stored.seat !== decoded.seat) {
+        emitError(socket, '重连令牌已失效', 'RESUME_TOKEN_EXPIRED');
+        return;
+      }
+
+      const room = await getRoom(decoded.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在或已关闭', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      const player = Game.getPlayer(room, decoded.seat);
+      if (!player || player.isAI || player.resumeJti !== decoded.jti) {
+        emitError(socket, '该身份已失效，请重新加入', 'RESUME_REVOKED');
+        return;
+      }
+
+      if (stored.activeSocketId && stored.activeSocketId !== socket.id) {
+        const oldSocket = io.sockets.sockets.get(stored.activeSocketId);
+        if (oldSocket) {
+          emitError(oldSocket, '该身份已在其他设备恢复连接', 'RESUME_REPLACED');
+          oldSocket.disconnect(true);
         }
+        socketSessions.delete(stored.activeSocketId);
       }
 
-      socketToRoom.delete(socket.id);
-      socket.leave(`room:${roomId}`);
-    });
-
-    // Start game
-    socket.on('game:start', async () => {
-      if (!checkRateLimit(socket.id)) {
-        socket.emit('room:error', { message: '操作过于频繁', code: 'RATE_LIMIT' });
-        return;
-      }
-
-      const data = socketToRoom.get(socket.id);
-      if (!data) return;
-
-      const { roomId, seat } = data;
-      const room = rooms.get(roomId);
-      
-      if (!room || room.hostSeat !== seat) {
-        socket.emit('room:error', { message: '只有房主可以开始游戏', code: 'NOT_HOST' });
-        return;
-      }
-
-      const check = GameLogic.canStartGame(room);
-      if (!check.canStart) {
-        socket.emit('room:error', { message: check.reason, code: 'CANNOT_START' });
-        return;
-      }
-
-      // Add AI players to fill to 4
-      GameLogic.addAIPlayers(room);
-      
-      // Deal cards
-      GameLogic.dealCards(room);
-      
-      // Start speaking phase
-      GameLogic.startSpeakingPhase(room);
-      room.deadlineTs = Date.now() + config.speechTimeoutSeconds * 1000;
-
-      await broadcastRoomState(room);
-
-      // Trigger AI if first speaker is AI
-      setTimeout(() => handleAIActions(room, io), 1000);
-    });
-
-    // Speak
-    socket.on('game:speak', async ({ text }: { text: string }) => {
-      if (!checkRateLimit(socket.id)) {
-        socket.emit('room:error', { message: '操作过于频繁', code: 'RATE_LIMIT' });
-        return;
-      }
-
-      const data = socketToRoom.get(socket.id);
-      if (!data) return;
-
-      const { roomId, seat } = data;
-      const room = rooms.get(roomId);
-      
-      if (!room || room.phase !== 'SPEAKING' || room.currentSpeaker !== seat) {
-        socket.emit('room:error', { message: '现在不是你的回合', code: 'NOT_YOUR_TURN' });
-        return;
-      }
-
-      GameLogic.recordSpeech(room, seat, text);
-      io.to(`room:${roomId}`).emit('game:speech', {
-        seat,
-        text,
-        round: room.round
+      clearPendingDestroy(room);
+      bindSocketToRoom(socket, room, decoded.seat);
+      await saveResumeRecord(decoded.jti, {
+        ...stored,
+        activeSocketId: socket.id
       });
 
-      // Move to next speaker
-      const nextSpeaker = GameLogic.getNextSpeaker(room);
-      if (nextSpeaker) {
-        room.currentSpeaker = nextSpeaker;
-        room.deadlineTs = Date.now() + config.speechTimeoutSeconds * 1000;
-        await broadcastRoomState(room);
-        
-        // Check if next is AI
-        setTimeout(() => handleAIActions(room, io), 100);
-      } else {
-        // End speaking phase
-        room.deadlineTs = Date.now() + config.voteTimeoutSeconds * 1000;
-        GameLogic.startVotingPhase(room);
-        await broadcastRoomState(room);
-        
-        // Trigger AI votes
-        setTimeout(() => handleAIVoting(room, io), 1000);
-      }
+      await syncAndBroadcast(io, room);
+      socket.emit('room:joined', {
+        roomId: room.id,
+        seat: decoded.seat,
+        resumeToken: token
+      });
     });
 
-    // Vote
-    socket.on('game:vote', async ({ toSeat }: { toSeat: number }) => {
-      if (!checkRateLimit(socket.id)) {
-        socket.emit('room:error', { message: '操作过于频繁', code: 'RATE_LIMIT' });
+    socket.on('room:leave', async () => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
         return;
       }
 
-      const data = socketToRoom.get(socket.id);
-      if (!data) return;
-
-      const { roomId, seat } = data;
-      const room = rooms.get(roomId);
-      
-      if (!room || room.phase !== 'VOTING') {
-        socket.emit('room:error', { message: '现在不是投票阶段', code: 'NOT_VOTING_PHASE' });
+      const session = unbindSocket(socket);
+      if (!session) {
         return;
       }
 
-      // Validate vote target
-      if (toSeat !== 0) {
-        const target = room.players.get(toSeat as SeatNumber);
-        if (!target || !target.isAlive) {
-          socket.emit('room:error', { message: '无效的目标', code: 'INVALID_TARGET' });
-          return;
-        }
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        return;
       }
 
-      GameLogic.recordVote(room, seat, toSeat as SeatNumber);
-      await broadcastRoomState(room);
+      const leavingPlayer = Game.getPlayer(room, session.seat);
+      if (leavingPlayer?.resumeJti) {
+        await deleteResumeRecord(leavingPlayer.resumeJti);
+        leavingPlayer.resumeJti = undefined;
+      }
 
-      // Check if all voted
-      const alivePlayers = GameLogic.getAlivePlayers(room);
-      const votedCount = Array.from(room.votes.keys()).filter(
-        s => room.players.get(s)?.isAlive
-      ).length;
+      Game.removeOrConvertHumanPlayer(room, session.seat);
+      refreshPendingDestroy(room);
 
-      if (votedCount >= alivePlayers.length) {
-        await resolveVoting(room, io);
+      await syncAndBroadcast(io, room);
+
+      if (room.phase === 'SPEAKING') {
+        await processAISpeaking(io, room.id);
       }
     });
 
-    // Ping for keepalive
+    socket.on('game:start', async () => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
+        return;
+      }
+
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (room.hostSeat !== session.seat) {
+        emitError(socket, '只有房主可以开始游戏', 'NOT_HOST');
+        return;
+      }
+
+      const startCheck = Game.canStartGame(room);
+      if (!startCheck.ok) {
+        emitError(socket, startCheck.reason ?? '无法开始游戏', 'CANNOT_START');
+        return;
+      }
+
+      Game.fillAIToFour(room);
+      Game.dealRoles(room);
+      await syncAndBroadcast(io, room, true);
+
+      Game.beginSpeakingPhase(room, 1);
+      room.deadlineTs = now() + config.speechTimeoutSeconds * 1000;
+      await syncAndBroadcast(io, room, true);
+      scheduleRoomDeadline(io, room);
+      await processAISpeaking(io, room.id);
+    });
+
+    socket.on('game:speak', async (payload: { text?: string }) => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
+        return;
+      }
+
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (room.phase !== 'SPEAKING' || room.currentSpeaker !== session.seat) {
+        emitError(socket, '当前不是你的发言回合', 'NOT_YOUR_TURN');
+        return;
+      }
+
+      const text = (payload.text ?? '').trim();
+      if (!text) {
+        emitError(socket, '发言不能为空', 'EMPTY_SPEECH');
+        return;
+      }
+
+      await submitSpeech(io, room, session.seat, text);
+    });
+
+    socket.on('game:vote', async (payload: { toSeat?: number }) => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
+        return;
+      }
+
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (room.phase !== 'VOTING') {
+        emitError(socket, '当前不是投票阶段', 'NOT_VOTING_PHASE');
+        return;
+      }
+
+      const voter = Game.getPlayer(room, session.seat);
+      if (!voter || !voter.isAlive) {
+        emitError(socket, '你已出局，无法投票', 'ELIMINATED');
+        return;
+      }
+
+      if (room.votes[session.seat] !== undefined) {
+        emitError(socket, '你已经投过票了', 'ALREADY_VOTED');
+        return;
+      }
+
+      const rawTo = payload.toSeat;
+      if (typeof rawTo !== 'number' || !Number.isInteger(rawTo)) {
+        emitError(socket, '无效投票目标', 'INVALID_VOTE');
+        return;
+      }
+
+      const toSeat = (rawTo >= 1 && rawTo <= 4 ? rawTo : 0) as VoteTarget;
+      if (!Game.isValidVoteTarget(room, toSeat)) {
+        emitError(socket, '目标不可投票', 'INVALID_TARGET');
+        return;
+      }
+
+      Game.recordVote(room, session.seat, toSeat);
+      await syncAndBroadcast(io, room);
+
+      if (Game.allAlivePlayersVoted(room)) {
+        await resolveVoting(io, room);
+      }
+    });
+
     socket.on('game:ping', () => {
-      socket.emit('game:pong', { timestamp: Date.now() });
+      socket.emit('game:pong', { ts: now() });
     });
 
-    // Disconnect handling
     socket.on('disconnect', async () => {
-      logger.info({ socketId: socket.id }, 'Client disconnected');
-      
-      const data = socketToRoom.get(socket.id);
-      if (data) {
-        const { roomId, seat } = data;
-        const room = rooms.get(roomId);
-        
-        if (room) {
-          const player = room.players.get(seat);
-          if (player && !player.isAI) {
-            // Keep player in room for reconnection, just clear socket
-            player.socketId = undefined;
-            await saveRoomToRedis(room);
-          }
-        }
-        
-        socketToRoom.delete(socket.id);
+      logger.info({ socketId: socket.id }, 'Socket disconnected');
+
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        return;
       }
+
+      socketSessions.delete(socket.id);
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        return;
+      }
+
+      Game.markPlayerDisconnected(room, session.seat);
+
+      const player = Game.getPlayer(room, session.seat);
+      if (player?.resumeJti) {
+        const record = await loadResumeRecord(player.resumeJti);
+        if (record?.activeSocketId === socket.id) {
+          await saveResumeRecord(player.resumeJti, {
+            ...record,
+            activeSocketId: undefined
+          });
+        }
+      }
+
+      await syncAndBroadcast(io, room);
     });
   });
 
-  // Cleanup expired rooms periodically
-  setInterval(async () => {
-    for (const [roomId, room] of rooms.entries()) {
-      // Check if room has been inactive for too long
-      const lastActivity = Date.now() - room.updatedAt;
-      const humanPlayers = Array.from(room.players.values()).filter(p => !p.isAI);
-      
-      if (humanPlayers.length === 0 && lastActivity > 60000) {
-        // Remove empty rooms after 1 minute
-        rooms.delete(roomId);
-        await redisClient.del(`room:${roomId}`);
-        logger.info({ roomId }, 'Cleaned up empty room');
-      } else if (lastActivity > 10 * 60 * 1000) {
-        // Remove inactive rooms after 10 minutes
-        rooms.delete(roomId);
-        await redisClient.del(`room:${roomId}`);
-        logger.info({ roomId }, 'Cleaned up inactive room');
+  setInterval(() => {
+    const expireBefore = now() - RATE_LIMIT_WINDOW_MS * 2;
+    for (const [socketId, record] of rateWindows.entries()) {
+      if (record.resetAt < expireBefore) {
+        rateWindows.delete(socketId);
       }
     }
-  }, 60000); // Run every minute
+  }, 10000);
+
+  setInterval(() => {
+    void (async () => {
+      const currentTs = now();
+
+      for (const [roomId, room] of roomCache.entries()) {
+        if (room.pendingDestroyAt && currentTs >= room.pendingDestroyAt) {
+          await destroyRoom(io, roomId);
+          continue;
+        }
+
+        let changed = false;
+        const hasConnectedHuman = room.players.some((player) => !player.isAI && Boolean(player.socketId));
+        const humanCount = Game.getHumanCount(room);
+
+        if (humanCount > 0 && !hasConnectedHuman && !room.pendingDestroyAt) {
+          room.pendingDestroyAt = currentTs + ROOM_IDLE_DESTROY_MS;
+          changed = true;
+        }
+        if (hasConnectedHuman && room.pendingDestroyAt) {
+          room.pendingDestroyAt = undefined;
+          changed = true;
+        }
+
+        if (room.phase === 'LOBBY') {
+          const staleHumans = room.players.filter(
+            (player) => !player.isAI && !player.socketId && currentTs - player.lastSeenAt >= ROOM_IDLE_DESTROY_MS
+          );
+
+          for (const stale of staleHumans) {
+            if (stale.resumeJti) {
+              await deleteResumeRecord(stale.resumeJti);
+            }
+            Game.removeOrConvertHumanPlayer(room, stale.seat);
+            changed = true;
+          }
+
+          if (staleHumans.length > 0) {
+            refreshPendingDestroy(room);
+          }
+        }
+
+        if (changed) {
+          await syncAndBroadcast(io, room);
+        }
+      }
+    })().catch((error) => {
+      logger.error({ err: error }, 'Periodic room cleanup failed');
+    });
+  }, 30000);
 }

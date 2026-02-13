@@ -1,16 +1,20 @@
 export type SeatNumber = 1 | 2 | 3 | 4;
 
+export type VoteTarget = SeatNumber | 0;
+
 export type PlayerRole = 'civilian' | 'undercover';
 
-export type GamePhase = 
-  | 'LOBBY' 
-  | 'DEAL' 
-  | 'SPEAKING' 
-  | 'VOTING' 
-  | 'RESOLVE' 
+export type Winner = 'civilian' | 'undercover';
+
+export type GamePhase =
+  | 'LOBBY'
+  | 'DEAL'
+  | 'SPEAKING'
+  | 'VOTING'
+  | 'RESOLVE'
   | 'END';
 
-export interface Player {
+export interface PlayerState {
   seat: SeatNumber;
   nickname: string;
   isAI: boolean;
@@ -18,39 +22,50 @@ export interface Player {
   role?: PlayerRole;
   word?: string;
   socketId?: string;
-}
-
-export interface Room {
-  id: string;
-  hostSeat: SeatNumber;
-  players: Map<SeatNumber, Player>;
-  phase: GamePhase;
-  round: number;
-  civilianWord?: string;
-  undercoverWord?: string;
-  currentSpeaker?: SeatNumber;
-  speeches: SpeechRecord[];
-  votes: Map<SeatNumber, SeatNumber>; // fromSeat -> toSeat (0 for abstain)
-  createdAt: number;
-  updatedAt: number;
-  deadlineTs?: number;
+  lastSeenAt: number;
+  resumeJti?: string;
 }
 
 export interface SpeechRecord {
   seat: SeatNumber;
   text: string;
   round: number;
-  timestamp: number;
+  ts: number;
+}
+
+export interface RoomState {
+  id: string;
+  hostSeat: SeatNumber;
+  phase: GamePhase;
+  round: number;
+  players: PlayerState[];
+  speeches: SpeechRecord[];
+  votes: Partial<Record<SeatNumber, VoteTarget>>;
+  currentSpeaker?: SeatNumber;
+  civilianWord?: string;
+  undercoverWord?: string;
+  deadlineTs?: number;
+  tieBreak: {
+    active: boolean;
+    candidates: SeatNumber[];
+  };
+  winner?: Winner;
+  createdAt: number;
+  updatedAt: number;
+  pendingDestroyAt?: number;
+}
+
+export interface VisiblePlayer {
+  seat: SeatNumber;
+  nickname: string;
+  isAI: boolean;
+  isAlive: boolean;
+  connected: boolean;
 }
 
 export interface VisibleState {
   roomId: string;
-  players: {
-    seat: SeatNumber;
-    nickname: string;
-    isAI: boolean;
-    isAlive: boolean;
-  }[];
+  players: VisiblePlayer[];
   phase: GamePhase;
   round: number;
   currentSpeaker?: SeatNumber;
@@ -60,12 +75,38 @@ export interface VisibleState {
   myWord?: string;
   isHost: boolean;
   deadlineTs?: number;
+  tieBreakCandidates: SeatNumber[];
 }
 
-export interface AISpeechResponse {
-  speech: string;
+export interface VoteResultPayload {
+  tally: Partial<Record<SeatNumber, number>>;
+  eliminatedSeat: SeatNumber | null;
+  round: number;
+  tie: boolean;
+  tieBreak: boolean;
 }
 
-export interface AIVoteResponse {
-  vote: number; // 0-4 (0 for abstain)
+export interface GameEndPayload {
+  winner: Winner;
+  reveal: {
+    rolesBySeat: Array<{
+      seat: SeatNumber;
+      nickname: string;
+      role: PlayerRole;
+      isAlive: boolean;
+    }>;
+    words: {
+      civilian: string;
+      undercover: string;
+    };
+  };
+}
+
+export interface AIContext {
+  mySeat: SeatNumber;
+  myRole: PlayerRole;
+  myWord: string;
+  round: number;
+  speeches: SpeechRecord[];
+  aliveSeats: SeatNumber[];
 }

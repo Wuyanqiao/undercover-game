@@ -1,69 +1,53 @@
-import { useState, useEffect } from 'react'
-import { useGameStore } from '../store/gameStore'
-import './HomePage.css'
+import { useEffect, useState } from 'react';
+import { useGameStore } from '../store/gameStore';
+import './HomePage.css';
 
 function HomePage() {
-  const [nickname, setNickname] = useState('')
-  const [roomId, setRoomId] = useState('')
-  const { connect, disconnect, isConnected, error, createRoom, joinRoom, clearError } = useGameStore()
+  const [roomId, setRoomId] = useState('');
+  const {
+    connected,
+    error,
+    nickname,
+    setNickname,
+    createRoom,
+    joinRoom,
+    clearError
+  } = useGameStore();
 
   useEffect(() => {
-    connect()
-    return () => {
-      disconnect()
+    if (!error) {
+      return;
     }
-  }, [])
-
-  useEffect(() => {
-    if (error) {
-      const timer = setTimeout(clearError, 5000)
-      return () => clearTimeout(timer)
-    }
-  }, [error])
-
-  const handleCreateRoom = () => {
-    if (nickname.trim()) {
-      createRoom(nickname.trim())
-    }
-  }
-
-  const handleJoinRoom = () => {
-    if (nickname.trim() && roomId.trim()) {
-      joinRoom(roomId.trim(), nickname.trim())
-    }
-  }
+    const timer = setTimeout(() => clearError(), 4000);
+    return () => clearTimeout(timer);
+  }, [error, clearError]);
 
   return (
     <div className="home-page">
       <h1>谁是卧底</h1>
-      <p className="subtitle">在线多人游戏</p>
+      <p className="subtitle">2~4 真人，自动 AI 补位到 4 座</p>
 
-      <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
-        {isConnected ? '已连接到服务器' : '正在连接服务器...'}
+      <div className={`connection-status ${connected ? 'connected' : 'disconnected'}`}>
+        {connected ? '服务器已连接' : '连接中...'}
       </div>
 
-      {error && (
-        <div className="error-message">
-          {error}
-        </div>
-      )}
+      {error && <div className="error-message">{error}</div>}
 
       <div className="card">
-        <h2>创建房间</h2>
+        <h2>你的昵称</h2>
         <div className="input-group">
-          <label>你的昵称</label>
           <input
             type="text"
-            placeholder="输入昵称"
-            value={nickname}
-            onChange={(e) => setNickname(e.target.value)}
+            placeholder="输入昵称（最多12字）"
             maxLength={12}
+            value={nickname}
+            onChange={(event) => setNickname(event.target.value)}
           />
         </div>
-        <button 
-          className="btn-primary" 
-          onClick={handleCreateRoom}
-          disabled={!nickname.trim() || !isConnected}
+        <button
+          className="btn-primary"
+          disabled={!connected || !nickname.trim()}
+          onClick={() => createRoom(nickname)}
         >
           创建房间
         </button>
@@ -74,35 +58,24 @@ function HomePage() {
       <div className="card">
         <h2>加入房间</h2>
         <div className="input-group">
-          <label>你的昵称</label>
           <input
             type="text"
-            placeholder="输入昵称"
-            value={nickname}
-            onChange={(e) => setNickname(e.target.value)}
-            maxLength={12}
-          />
-        </div>
-        <div className="input-group">
-          <label>房间号</label>
-          <input
-            type="text"
-            placeholder="输入房间号"
-            value={roomId}
-            onChange={(e) => setRoomId(e.target.value.toUpperCase())}
+            placeholder="输入 6 位房间号"
             maxLength={6}
+            value={roomId}
+            onChange={(event) => setRoomId(event.target.value.toUpperCase())}
           />
         </div>
-        <button 
-          className="btn-primary" 
-          onClick={handleJoinRoom}
-          disabled={!nickname.trim() || !roomId.trim() || !isConnected}
+        <button
+          className="btn-primary"
+          disabled={!connected || !nickname.trim() || roomId.trim().length < 6}
+          onClick={() => joinRoom(roomId, nickname)}
         >
           加入房间
         </button>
       </div>
     </div>
-  )
+  );
 }
 
-export default HomePage
+export default HomePage;
