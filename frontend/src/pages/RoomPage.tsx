@@ -18,6 +18,7 @@ function RoomPage() {
   const [speechInput, setSpeechInput] = useState('');
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [hasVoted, setHasVoted] = useState(false);
+  const [targetCountDraft, setTargetCountDraft] = useState(4);
 
   const {
     connected,
@@ -31,6 +32,8 @@ function RoomPage() {
     joinRoom,
     leaveRoom,
     startGame,
+    restartGame,
+    setTargetPlayerCount,
     speak,
     vote
   } = useGameStore();
@@ -70,6 +73,13 @@ function RoomPage() {
     const timer = setInterval(tick, 500);
     return () => clearInterval(timer);
   }, [roomState?.deadlineTs]);
+
+  useEffect(() => {
+    if (!roomState) {
+      return;
+    }
+    setTargetCountDraft(roomState.targetPlayerCount);
+  }, [roomState?.targetPlayerCount]);
 
   const alivePlayers = useMemo(() => {
     return roomState?.players.filter((player) => player.isAlive) ?? [];
@@ -133,6 +143,7 @@ function RoomPage() {
   const myAlive = Boolean(myPlayer?.isAlive);
   const myTurn = roomState.phase === 'SPEAKING' && roomState.currentSpeaker === mySeat && myAlive;
   const votingNow = roomState.phase === 'VOTING' && myAlive;
+  const allSeats = Array.from({ length: roomState.targetPlayerCount }, (_, index) => index + 1);
 
   const handleLeave = () => {
     leaveRoom();
@@ -169,6 +180,7 @@ function RoomPage() {
             邀请链接: {inviteLink}
           </div>
         )}
+        <div style={{ marginTop: 8, fontSize: 13, color: '#666' }}>本房间目标人数: {roomState.targetPlayerCount}</div>
       </div>
 
       {roomState.phase !== 'LOBBY' && roomState.myRole && (
@@ -224,11 +236,44 @@ function RoomPage() {
               </div>
             </div>
           </div>
+
+          <div className="end-actions">
+            {roomState.isHost ? (
+              <>
+                <div className="capacity-control">
+                  <label htmlFor="targetCountEnd">下局人数</label>
+                  <div className="capacity-row">
+                    <input
+                      id="targetCountEnd"
+                      type="number"
+                      min={4}
+                      max={12}
+                      value={targetCountDraft}
+                      onChange={(event) => setTargetCountDraft(Number(event.target.value) || 4)}
+                    />
+                    <button className="btn-primary" onClick={() => setTargetPlayerCount(targetCountDraft)}>
+                      保存人数
+                    </button>
+                  </div>
+                </div>
+                <button className="start-btn" onClick={restartGame}>
+                  再来一局
+                </button>
+              </>
+            ) : (
+              <div className="waiting-message" style={{ marginBottom: 10 }}>
+                等待房主选择是否再来一局...
+              </div>
+            )}
+            <button className="leave-btn end-leave-btn" onClick={handleLeave}>
+              结束并离开
+            </button>
+          </div>
         </div>
       )}
 
       <div className="seats-grid">
-        {[1, 2, 3, 4].map((seat) => {
+        {allSeats.map((seat) => {
           const player = roomState.players.find((item) => item.seat === seat);
           if (!player) {
             return (
@@ -260,9 +305,28 @@ function RoomPage() {
       </div>
 
       {roomState.phase === 'LOBBY' && roomState.isHost && (
-        <button className="start-btn" onClick={startGame}>
-          开始游戏（真人 {roomState.players.filter((player) => !player.isAI).length} 人）
-        </button>
+        <div className="action-section">
+          <h3>房间人数设置</h3>
+          <div className="capacity-control">
+            <label htmlFor="targetCountLobby">目标人数（4-12）</label>
+            <div className="capacity-row">
+              <input
+                id="targetCountLobby"
+                type="number"
+                min={4}
+                max={12}
+                value={targetCountDraft}
+                onChange={(event) => setTargetCountDraft(Number(event.target.value) || 4)}
+              />
+              <button className="btn-primary" onClick={() => setTargetPlayerCount(targetCountDraft)}>
+                保存人数
+              </button>
+            </div>
+          </div>
+          <button className="start-btn" onClick={startGame}>
+            开始游戏（真人 {roomState.players.filter((player) => !player.isAI).length}/{roomState.targetPlayerCount}）
+          </button>
+        </div>
       )}
 
       {roomState.phase === 'LOBBY' && !roomState.isHost && (

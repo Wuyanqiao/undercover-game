@@ -46,6 +46,10 @@ const ROOM_IDLE_DESTROY_MS = config.roomTimeoutMinutes * 60 * 1000;
 
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
+function ensureRoomShape(room: RoomState): void {
+  room.targetPlayerCount = Game.normalizeTargetPlayerCount(room.targetPlayerCount ?? Game.DEFAULT_TARGET_PLAYER_COUNT);
+}
+
 function roomChannel(roomId: string): string {
   return `room:${roomId}`;
 }
@@ -104,6 +108,7 @@ function emitPhase(io: Server, room: RoomState): void {
 async function getRoom(roomId: string): Promise<RoomState | null> {
   const cached = roomCache.get(roomId);
   if (cached) {
+    ensureRoomShape(cached);
     return cached;
   }
 
@@ -112,11 +117,13 @@ async function getRoom(roomId: string): Promise<RoomState | null> {
     return null;
   }
 
+  ensureRoomShape(loaded);
   roomCache.set(roomId, loaded);
   return loaded;
 }
 
 async function persistRoom(room: RoomState): Promise<void> {
+  ensureRoomShape(room);
   roomCache.set(room.id, room);
   await saveRoom(room);
 }
@@ -293,6 +300,18 @@ function unbindSocket(socket: Socket): SocketSession | null {
   socketSessions.delete(socket.id);
   socket.leave(roomChannel(session.roomId));
   return session;
+}
+
+async function startGameRound(io: Server, room: RoomState): Promise<void> {
+  Game.fillAIToTarget(room);
+  Game.dealRoles(room);
+  await syncAndBroadcast(io, room, true);
+
+  Game.beginSpeakingPhase(room, 1);
+  room.deadlineTs = now() + config.speechTimeoutSeconds * 1000;
+  await syncAndBroadcast(io, room, true);
+  scheduleRoomDeadline(io, room);
+  await processAISpeaking(io, room.id);
 }
 
 async function beginVoting(io: Server, room: RoomState, candidates: SeatNumber[] = []): Promise<void> {
@@ -700,6 +719,45 @@ export function setupSocketHandlers(io: Server): void {
       }
     });
 
+    socket.on('room:target:set', async (payload: { targetPlayerCount?: number }) => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
+        return;
+      }
+
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (room.hostSeat !== session.seat) {
+        emitError(socket, '只有房主可以调整人数', 'NOT_HOST');
+        return;
+      }
+
+      const desired = Number(payload.targetPlayerCount);
+      if (!Number.isFinite(desired)) {
+        emitError(socket, '人数参数错误', 'INVALID_TARGET_PLAYER_COUNT');
+        return;
+      }
+
+      const check = Game.canSetTargetPlayerCount(room, desired);
+      if (!check.ok) {
+        emitError(socket, check.reason ?? '无法调整人数', 'CANNOT_SET_TARGET_PLAYER_COUNT');
+        return;
+      }
+
+      Game.setTargetPlayerCount(room, desired);
+      await syncAndBroadcast(io, room);
+    });
+
     socket.on('game:start', async () => {
       if (!allowSocketMessage(socket.id)) {
         emitError(socket, '操作过于频繁', 'RATE_LIMIT');
@@ -729,15 +787,49 @@ export function setupSocketHandlers(io: Server): void {
         return;
       }
 
-      Game.fillAIToFour(room);
-      Game.dealRoles(room);
-      await syncAndBroadcast(io, room, true);
+      await startGameRound(io, room);
+    });
 
-      Game.beginSpeakingPhase(room, 1);
-      room.deadlineTs = now() + config.speechTimeoutSeconds * 1000;
+    socket.on('game:restart', async () => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
+        return;
+      }
+
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (room.phase !== 'END') {
+        emitError(socket, '当前还未结算，不能重开', 'NOT_IN_END_PHASE');
+        return;
+      }
+
+      if (room.hostSeat !== session.seat) {
+        emitError(socket, '只有房主可以选择再来一局', 'NOT_HOST');
+        return;
+      }
+
+      clearPendingDestroy(room);
+      Game.resetRoomForRematch(room);
+
+      const startCheck = Game.canStartGame(room);
+      if (!startCheck.ok) {
+        await syncAndBroadcast(io, room, true);
+        emitError(socket, startCheck.reason ?? '人数不足，无法重开', 'CANNOT_RESTART');
+        return;
+      }
+
       await syncAndBroadcast(io, room, true);
-      scheduleRoomDeadline(io, room);
-      await processAISpeaking(io, room.id);
+      await startGameRound(io, room);
     });
 
     socket.on('game:speak', async (payload: { text?: string }) => {
@@ -812,7 +904,7 @@ export function setupSocketHandlers(io: Server): void {
         return;
       }
 
-      const toSeat = (rawTo >= 1 && rawTo <= 4 ? rawTo : 0) as VoteTarget;
+      const toSeat = (rawTo >= 1 && rawTo <= room.targetPlayerCount ? rawTo : 0) as VoteTarget;
       if (!Game.isValidVoteTarget(room, toSeat)) {
         emitError(socket, '目标不可投票', 'INVALID_TARGET');
         return;

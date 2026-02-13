@@ -193,7 +193,7 @@ function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget 
     return 0;
   }
 
-  if (raw >= 1 && raw <= 4 && aliveSeats.includes(raw as SeatNumber)) {
+  if (raw >= 1 && aliveSeats.includes(raw as SeatNumber)) {
     return raw as SeatNumber;
   }
 
@@ -201,17 +201,19 @@ function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget 
 }
 
 const fallbackCivilianSpeech = [
-  '这个词很常见，生活里经常出现。',
-  '它比较具体，大家应该都接触过。',
-  '我觉得它偏向日常场景。',
-  '这个词给人的感觉比较直观。'
+  '它常见但别太直白，我先装糊涂。',
+  '这词不难猜，但我先给点烟雾弹。',
+  '我想到日常场景，细节先藏一半。',
+  '它很接地气，我先说个绕弯线索。',
+  '这个词像老熟人，我先假装不熟。'
 ];
 
 const fallbackUndercoverSpeech = [
-  '这个词应该属于常见类别。',
-  '我觉得它和生活场景有关。',
-  '这个词描述起来不算抽象。',
-  '从体验上说，大家可能都见过。'
+  '我先说个安全描述，别问太细。',
+  '这词我有感觉，但先走中庸路线。',
+  '我懂一点点，先说得像懂很多。',
+  '我这波发言主打一个稳中带偏。',
+  '请相信我的胡说八道有理有据。'
 ];
 
 export class AIClient {
@@ -236,7 +238,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”玩家。只输出 JSON，不要任何解释或 markdown。JSON schema: {"speech":"string<=30字"}。'
+              '你是“谁是卧底”玩家。发言要满足：1) 与自己词语语义相关；2) 带一点误导性，不要太直接；3) 有轻微幽默感；4) 控制在30字内。只输出 JSON，不要解释或 markdown。JSON schema: {"speech":"string<=30字"}。'
           },
           {
             role: 'user',
@@ -270,7 +272,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”玩家。只输出 JSON，不要任何解释或 markdown。JSON schema: {"vote":0|1|2|3|4}。'
+              '你是“谁是卧底”玩家。请在保持策略性的同时，不要每轮都给出绝对判断，必要时可保守投票或弃权，以提高局内博弈轮次。只输出 JSON，不要解释或 markdown。JSON schema: {"vote": number}，其中0为弃权，其他必须是存活座位号。'
           },
           {
             role: 'user',
@@ -316,7 +318,7 @@ export class AIClient {
       `当前轮次: ${context.round}`,
       `存活座位: ${context.aliveSeats.join(', ')}`,
       speechLog ? `本轮已有发言:\n${speechLog}` : '你是本轮首个发言',
-      '请给出一句不超过30字的发言。'
+      '请给出一句不超过30字的发言：要贴合词义、略带误导、稍微幽默。'
     ].join('\n');
   }
 
@@ -332,7 +334,7 @@ export class AIClient {
       `当前轮次: ${context.round}`,
       `存活座位: ${context.aliveSeats.join(', ')}`,
       speechLog ? `公开发言记录:\n${speechLog}` : '暂无公开发言',
-      '请在存活玩家中投票，输出 1~4；或输出 0 表示弃权。'
+      '请投给你最怀疑的存活玩家，必要时可输出0弃权。投票只能是0或存活座位号。'
     ].join('\n');
   }
 
@@ -342,6 +344,9 @@ export class AIClient {
   }
 
   private fallbackVote(context: AIContext): VoteTarget {
+    if (Math.random() < 0.2) {
+      return 0;
+    }
     const options = context.aliveSeats.filter((seat) => seat !== context.mySeat);
     if (options.length === 0) {
       return 0;

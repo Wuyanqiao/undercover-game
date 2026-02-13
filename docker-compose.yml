@@ -12,6 +12,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     container_name: undercover-backend
     restart: unless-stopped
     environment:
@@ -22,6 +24,7 @@ services:
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL}
       - JWT_SECRET=${JWT_SECRET}
+      - APP_VERSION=${APP_VERSION:-dev}
       - MAX_ROOMS=${MAX_ROOMS:-3}
       - MAX_AI_CONCURRENT=${MAX_AI_CONCURRENT:-2}
     depends_on:
@@ -38,6 +41,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     container_name: undercover-frontend
     restart: unless-stopped
     networks:

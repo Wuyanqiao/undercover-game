@@ -12,6 +12,9 @@ FROM node:20-alpine AS runner
 
 WORKDIR /app
 
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 COPY package*.json ./
 RUN npm ci --omit=dev
 

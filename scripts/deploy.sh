@@ -13,6 +13,14 @@ if [[ -d .git ]]; then
   git pull --rebase || echo "[WARN] git pull 失败，请手动处理冲突后重试"
 fi
 
+if [[ -d .git ]]; then
+  APP_VERSION="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+else
+  APP_VERSION="dev"
+fi
+export APP_VERSION
+echo "[INFO] 使用版本指纹 APP_VERSION=$APP_VERSION"
+
 echo "[INFO] 构建并启动容器"
 docker compose up -d --build --remove-orphans
 

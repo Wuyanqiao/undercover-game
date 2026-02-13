@@ -1,12 +1,12 @@
 # 谁是卧底（Undercover Game）
 
-在线版“谁是卧底”网页游戏，支持 2/3/4 真人 + AI 自动补位到 4 座，适配手机和桌面浏览器。
+在线版“谁是卧底”网页游戏，支持 2~12 真人，房主可设置 4~12 座位，不足座位自动 AI 补全。
 
 已按 Ubuntu 22.04 + 2核2G 服务器部署场景设计，支持 `docker compose up -d --build` 一键启动。
 
 ## 核心能力
 
-- 固定 4 座位（Seat1~Seat4），真人不足自动补 AI
+- 房主可设置 4~12 座位，真人不足自动补 AI
 - 无登录系统，游客昵称即可进入
 - 最多同时 3 个活跃房间
 - Redis 存储房间状态、限流与重连令牌
@@ -82,6 +82,7 @@ cp .env.example .env
 ```env
 DOMAIN=who-is-spy.online
 EMAIL=jiujiangzhie@qq.com
+LETSENCRYPT_STAGING=0
 
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
@@ -90,6 +91,7 @@ DEEPSEEK_MODEL=deepseek-chat
 REDIS_URL=redis://redis:6379
 NODE_ENV=production
 PORT=3000
+APP_VERSION=dev
 
 MAX_ROOMS=3
 MAX_AI_CONCURRENT=2
@@ -100,6 +102,11 @@ TIEBREAK_TIMEOUT_SECONDS=15
 
 JWT_SECRET=change-this-to-a-random-long-secret
 ```
+
+说明：
+
+- `APP_VERSION` 会显示在页面右下角版本指纹（build hash）
+- 使用 `scripts/deploy.sh` 时会自动注入当前 git commit short hash
 
 ## 4) 首次申请 HTTPS 证书
 
@@ -112,6 +119,7 @@ chmod +x scripts/init-letsencrypt.sh scripts/deploy.sh
 
 - 读取 `.env` 的 `DOMAIN/EMAIL`
 - 创建临时证书拉起 Nginx
+- 自动做 ACME challenge 本机 + 公网自检
 - 调用 Certbot 正式签发
 - 重载 Nginx
 
@@ -138,6 +146,7 @@ curl -k https://who-is-spy.online/api/health
 该脚本会执行：
 
 - `git pull --rebase`（如果目录是 git 仓库）
+- 自动提取当前 commit short hash 作为 `APP_VERSION`
 - `docker compose up -d --build --remove-orphans`
 - 后端健康检查
 
@@ -149,9 +158,9 @@ curl -k https://who-is-spy.online/api/health
 
 规则实现：
 
-- 房间固定 4 座，开始时真人不足自动补 AI
+- 房主可设置房间目标人数为 4~12，开始时真人不足自动补 AI
 - 至少 2 名真人才能开始
-- 角色固定：1 卧底 + 3 平民
+- 角色固定：1 卧底 + (目标人数-1) 平民
 - 发言阶段：按存活座位顺序，每人 30 秒
   - 超时自动发言：`（超时）`
   - AI 回合由后端驱动生成发言
@@ -167,6 +176,9 @@ curl -k https://who-is-spy.online/api/health
 - 胜负判断：
   - 卧底出局 -> 平民胜
   - 存活卧底数 >= 存活平民数 -> 卧底胜
+- 结算后：
+  - 房主可在同一房间点击“再来一局”直接重开
+  - 任意玩家可“结束并离开”
 
 房间生命周期：
 
@@ -183,13 +195,20 @@ curl -k https://who-is-spy.online/api/health
 - 全局并发上限：`MAX_AI_CONCURRENT`（默认 2）
 - JSON 强约束校验：
   - 发言：`{"speech":"...<=30字"}`
-  - 投票：`{"vote":0|1|2|3|4}`
+  - 投票：`{"vote": number}`（0=弃权，其它必须为存活座位号）
 - base_url 或 key 不可用时自动降级模板，不阻塞游戏
 
 安全可见性控制（Prompt）：
 
 - AI 仅看到：自己的身份、自己的词、公共发言、存活座位、轮次、座位号
 - 不会收到全局角色表或全局词分配
+- 发言策略：贴合词义 + 适度误导 + 轻幽默，增加博弈轮次与乐趣
+
+词对如何“出题”：
+
+- 内置词库在 `backend/src/game/words.ts`（30+ 组）
+- 每局随机抽取一组平民词/卧底词
+- 同一房间重开时，尽量避免与上一局词对完全重复
 
 ## 9) Socket.IO 事件协议
 
@@ -198,7 +217,9 @@ curl -k https://who-is-spy.online/api/health
 - `room:create { nickname }`
 - `room:join { roomId, nickname }`
 - `room:leave {}`
+- `room:target:set { targetPlayerCount }`（房主在 LOBBY/END 可设置 4~12）
 - `game:start {}`
+- `game:restart {}`
 - `game:speak { text }`
 - `game:vote { toSeat }`
 - `game:ping {}`
@@ -249,12 +270,18 @@ docker compose down
 - 检查 `nginx/conf.d/app.conf` 中 `/socket.io/` 反代
 - 查看 `docker compose logs -f nginx backend`
 
-3. AI 不发言/不投票
+3. 页面显示旧版本
+
+- 优先看页面右下角 build 指纹是否与服务器 commit 一致
+- 用无痕窗口或 `Ctrl+F5` 强刷，排除静态资源缓存
+- 再执行 `./scripts/deploy.sh` 触发重建
+
+4. AI 不发言/不投票
 
 - 检查 `.env` 中 `DEEPSEEK_*`
 - 查看后端日志是否进入 fallback（这是容错设计，游戏仍可继续）
 
-4. 无法创建新房间
+5. 无法创建新房间
 
 - 已达到活跃房间上限 3
 - 等待房间结束/销毁，或主动离开空房
@@ -263,7 +290,7 @@ docker compose down
 
 1. 浏览器 A 打开首页，输入昵称，创建房间
 2. 浏览器 B 打开首页，输入昵称，加入同房间
-3. 房主点击开始，观察座位自动补齐 2 个 AI
+3. 房主先设置目标人数（例如 6），再点击开始，观察 AI 自动补齐空位
 4. 完整走一局：发言 -> 投票 -> 淘汰 -> 胜负揭示
 5. 断开一个浏览器网络再恢复，确认可自动恢复房间状态
 

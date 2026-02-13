@@ -5,6 +5,8 @@ import HomePage from './pages/HomePage'
 import RoomPage from './pages/RoomPage'
 import './App.css'
 
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev'
+
 function App() {
   const navigate = useNavigate()
   const { ensureSocket, socket } = useGameStore()
@@ -35,6 +37,7 @@ function App() {
         <Route path="/" element={<HomePage />} />
         <Route path="/room/:roomId" element={<RoomPage />} />
       </Routes>
+      <div className="build-fingerprint">build {APP_VERSION}</div>
     </div>
   )
 }

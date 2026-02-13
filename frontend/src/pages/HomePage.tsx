@@ -25,7 +25,7 @@ function HomePage() {
   return (
     <div className="home-page">
       <h1>谁是卧底</h1>
-      <p className="subtitle">2~4 真人，自动 AI 补位到 4 座</p>
+      <p className="subtitle">2~12 真人，房主可设 4~12 座并自动 AI 补位</p>
 
       <div className={`connection-status ${connected ? 'connected' : 'disconnected'}`}>
         {connected ? '服务器已连接' : '连接中...'}

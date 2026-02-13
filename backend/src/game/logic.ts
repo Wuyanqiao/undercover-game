@@ -9,7 +9,9 @@ import {
 } from '../types';
 import { getRandomWordPair } from './words';
 
-export const ALL_SEATS: SeatNumber[] = [1, 2, 3, 4];
+export const MIN_PLAYERS_PER_ROOM = 4;
+export const MAX_PLAYERS_PER_ROOM = 12;
+export const DEFAULT_TARGET_PLAYER_COUNT = 4;
 
 const MAX_NICKNAME_LENGTH = 12;
 const MAX_SPEECH_LENGTH = 30;
@@ -27,6 +29,24 @@ function touch(room: RoomState): void {
   room.updatedAt = now();
 }
 
+export function normalizeTargetPlayerCount(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_TARGET_PLAYER_COUNT;
+  }
+  const rounded = Math.floor(value);
+  if (rounded < MIN_PLAYERS_PER_ROOM) {
+    return MIN_PLAYERS_PER_ROOM;
+  }
+  if (rounded > MAX_PLAYERS_PER_ROOM) {
+    return MAX_PLAYERS_PER_ROOM;
+  }
+  return rounded;
+}
+
+function getAllSeats(room: RoomState): SeatNumber[] {
+  return Array.from({ length: room.targetPlayerCount }, (_, index) => index + 1);
+}
+
 export function createRoom(roomId: string, hostNickname: string, socketId: string): RoomState {
   const host: PlayerState = {
     seat: 1,
@@ -40,6 +60,7 @@ export function createRoom(roomId: string, hostNickname: string, socketId: strin
   return {
     id: roomId,
     hostSeat: 1,
+    targetPlayerCount: DEFAULT_TARGET_PLAYER_COUNT,
     phase: 'LOBBY',
     round: 0,
     players: [host],
@@ -74,7 +95,7 @@ export function getAliveSeats(room: RoomState): SeatNumber[] {
 
 export function getEmptySeats(room: RoomState): SeatNumber[] {
   const used = new Set(room.players.map((p) => p.seat));
-  return ALL_SEATS.filter((seat) => !used.has(seat));
+  return getAllSeats(room).filter((seat) => !used.has(seat));
 }
 
 export function getHumanCount(room: RoomState): number {
@@ -98,6 +119,32 @@ export function addHumanPlayer(room: RoomState, nickname: string, socketId: stri
   room.players.push(player);
   touch(room);
   return player;
+}
+
+export function canSetTargetPlayerCount(room: RoomState, nextTarget: number): { ok: boolean; reason?: string } {
+  if (room.phase !== 'LOBBY' && room.phase !== 'END') {
+    return { ok: false, reason: '当前阶段不可调整人数' };
+  }
+
+  const normalized = normalizeTargetPlayerCount(nextTarget);
+  const humanCount = getHumanCount(room);
+  if (normalized < humanCount) {
+    return { ok: false, reason: `目标人数不能小于当前真人数(${humanCount})` };
+  }
+
+  const maxHumanSeat = room.players
+    .filter((player) => !player.isAI)
+    .reduce((max, player) => Math.max(max, player.seat), 0);
+  if (normalized < maxHumanSeat) {
+    return { ok: false, reason: `目标人数不能小于当前最大真人座位(${maxHumanSeat})` };
+  }
+
+  return { ok: true };
+}
+
+export function setTargetPlayerCount(room: RoomState, nextTarget: number): void {
+  room.targetPlayerCount = normalizeTargetPlayerCount(nextTarget);
+  touch(room);
 }
 
 export function removeOrConvertHumanPlayer(room: RoomState, seat: SeatNumber): void {
@@ -126,7 +173,7 @@ export function removeOrConvertHumanPlayer(room: RoomState, seat: SeatNumber): v
   touch(room);
 }
 
-export function fillAIToFour(room: RoomState): void {
+export function fillAIToTarget(room: RoomState): void {
   for (const seat of getEmptySeats(room)) {
     room.players.push({
       seat,
@@ -145,6 +192,9 @@ export function canStartGame(room: RoomState): { ok: boolean; reason?: string } 
   if (room.phase !== 'LOBBY') {
     return { ok: false, reason: '游戏已经开始' };
   }
+  if (room.targetPlayerCount < MIN_PLAYERS_PER_ROOM || room.targetPlayerCount > MAX_PLAYERS_PER_ROOM) {
+    return { ok: false, reason: `人数必须在${MIN_PLAYERS_PER_ROOM}-${MAX_PLAYERS_PER_ROOM}` };
+  }
   if (getHumanCount(room) < 2) {
     return { ok: false, reason: '至少需要2名真人玩家才能开始' };
   }
@@ -152,9 +202,10 @@ export function canStartGame(room: RoomState): { ok: boolean; reason?: string } 
 }
 
 export function dealRoles(room: RoomState): void {
-  const pair = getRandomWordPair();
-  room.civilianWord = pair.civilian;
-  room.undercoverWord = pair.undercover;
+  const picked = getRandomWordPair(room.lastWordPairKey);
+  room.lastWordPairKey = picked.key;
+  room.civilianWord = picked.pair.civilian;
+  room.undercoverWord = picked.pair.undercover;
 
   const shuffled = [...room.players];
   const undercoverIndex = Math.floor(Math.random() * shuffled.length);
@@ -164,10 +215,10 @@ export function dealRoles(room: RoomState): void {
     player.isAlive = true;
     if (player.seat === undercoverSeat) {
       player.role = 'undercover';
-      player.word = pair.undercover;
+      player.word = picked.pair.undercover;
     } else {
       player.role = 'civilian';
-      player.word = pair.civilian;
+      player.word = picked.pair.civilian;
     }
   }
 
@@ -178,6 +229,36 @@ export function dealRoles(room: RoomState): void {
   room.speeches = [];
   room.votes = {};
   room.currentSpeaker = undefined;
+  touch(room);
+}
+
+export function resetRoomForRematch(room: RoomState): void {
+  const humans = room.players.filter((player) => !player.isAI);
+
+  for (const player of humans) {
+    player.isAlive = true;
+    player.role = undefined;
+    player.word = undefined;
+  }
+
+  humans.sort((a, b) => a.seat - b.seat);
+  room.players = humans;
+
+  if (room.players.length > 0 && !room.players.some((player) => player.seat === room.hostSeat)) {
+    room.hostSeat = room.players[0].seat;
+  }
+
+  room.phase = 'LOBBY';
+  room.round = 0;
+  room.speeches = [];
+  room.votes = {};
+  room.currentSpeaker = undefined;
+  room.deadlineTs = undefined;
+  room.tieBreak = { active: false, candidates: [] };
+  room.winner = undefined;
+  room.civilianWord = undefined;
+  room.undercoverWord = undefined;
+
   touch(room);
 }
 
@@ -347,6 +428,7 @@ export function buildVisibleState(room: RoomState, viewerSeat?: SeatNumber): Vis
 
   return {
     roomId: room.id,
+    targetPlayerCount: room.targetPlayerCount,
     players: [...room.players]
       .sort((a, b) => a.seat - b.seat)
       .map((p) => ({

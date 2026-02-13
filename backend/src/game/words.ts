@@ -3,6 +3,11 @@ export interface WordPair {
   undercover: string;
 }
 
+export interface PickedWordPair {
+  pair: WordPair;
+  key: string;
+}
+
 // 30+ word pairs for the game
 export const wordPairs: WordPair[] = [
   { civilian: '苹果', undercover: '梨' },
@@ -40,6 +45,16 @@ export const wordPairs: WordPair[] = [
   { civilian: '筷子', undercover: '叉子' }
 ];
 
-export function getRandomWordPair(): WordPair {
-  return wordPairs[Math.floor(Math.random() * wordPairs.length)];
+function toPairKey(pair: WordPair): string {
+  return `${pair.civilian}|${pair.undercover}`;
+}
+
+export function getRandomWordPair(lastKey?: string): PickedWordPair {
+  const candidates = lastKey ? wordPairs.filter((pair) => toPairKey(pair) !== lastKey) : wordPairs;
+  const pool = candidates.length > 0 ? candidates : wordPairs;
+  const pair = pool[Math.floor(Math.random() * pool.length)];
+  return {
+    pair,
+    key: toPairKey(pair)
+  };
 }

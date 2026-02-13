@@ -14,7 +14,7 @@ const app = Fastify({
 app.get('/api/health', async () => {
   return {
     status: 'OK',
-    version: '1.0.0',
+    version: config.appVersion,
     timestamp: Date.now()
   };
 });

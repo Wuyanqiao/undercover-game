@@ -1,4 +1,4 @@
-export type SeatNumber = 1 | 2 | 3 | 4;
+export type SeatNumber = number;
 
 export type VoteTarget = SeatNumber | 0;
 
@@ -36,6 +36,7 @@ export interface SpeechRecord {
 export interface RoomState {
   id: string;
   hostSeat: SeatNumber;
+  targetPlayerCount: number;
   phase: GamePhase;
   round: number;
   players: PlayerState[];
@@ -44,6 +45,7 @@ export interface RoomState {
   currentSpeaker?: SeatNumber;
   civilianWord?: string;
   undercoverWord?: string;
+  lastWordPairKey?: string;
   deadlineTs?: number;
   tieBreak: {
     active: boolean;
@@ -65,6 +67,7 @@ export interface VisiblePlayer {
 
 export interface VisibleState {
   roomId: string;
+  targetPlayerCount: number;
   players: VisiblePlayer[];
   phase: GamePhase;
   round: number;

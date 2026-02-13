@@ -11,6 +11,7 @@ function readInt(name: string, fallback: number): number {
 }
 
 export const config = {
+  appVersion: process.env.APP_VERSION || 'dev',
   port: readInt('PORT', 3000),
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
   jwtSecret: process.env.JWT_SECRET || 'change-this-secret',

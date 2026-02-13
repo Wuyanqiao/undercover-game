@@ -22,6 +22,7 @@ export interface SpeechRecord {
 
 export interface RoomState {
   roomId: string;
+  targetPlayerCount: number;
   players: VisiblePlayer[];
   phase: GamePhase;
   round: number;
@@ -74,6 +75,8 @@ interface StoreState {
   joinRoom: (roomId: string, nickname?: string) => void;
   leaveRoom: () => void;
   startGame: () => void;
+  restartGame: () => void;
+  setTargetPlayerCount: (targetPlayerCount: number) => void;
   speak: (text: string) => void;
   vote: (toSeat: number) => void;
   clearError: () => void;
@@ -144,7 +147,11 @@ export const useGameStore = create<StoreState>((set, get) => ({
     });
 
     socket.on('room:state', (payload: RoomState) => {
-      set({ roomState: payload });
+      set((state) => ({
+        roomState: payload,
+        gameEnd: payload.phase === 'END' ? state.gameEnd : null,
+        voteResult: payload.phase === 'END' ? state.voteResult : payload.phase === 'LOBBY' ? null : state.voteResult
+      }));
     });
 
     socket.on('game:phase', (payload: { phase: GamePhase; round: number; deadlineTs?: number }) => {
@@ -158,7 +165,9 @@ export const useGameStore = create<StoreState>((set, get) => ({
           phase: payload.phase,
           round: payload.round,
           deadlineTs: payload.deadlineTs
-        }
+        },
+        gameEnd: payload.phase === 'END' ? get().gameEnd : null,
+        voteResult: payload.phase === 'LOBBY' ? null : get().voteResult
       });
     });
 
@@ -237,6 +246,22 @@ export const useGameStore = create<StoreState>((set, get) => ({
       return;
     }
     socket.emit('game:start', {});
+  },
+
+  restartGame: () => {
+    const socket = get().socket;
+    if (!socket) {
+      return;
+    }
+    socket.emit('game:restart', {});
+  },
+
+  setTargetPlayerCount: (targetPlayerCount: number) => {
+    const socket = get().socket;
+    if (!socket) {
+      return;
+    }
+    socket.emit('room:target:set', { targetPlayerCount });
   },
 
   speak: (text: string) => {
