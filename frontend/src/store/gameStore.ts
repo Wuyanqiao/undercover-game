@@ -3,7 +3,6 @@ import { io, Socket } from 'socket.io-client';
 
 export type GamePhase = 'LOBBY' | 'DEAL' | 'SPEAKING' | 'VOTING' | 'RESOLVE' | 'END';
 export type Winner = 'civilian' | 'undercover';
-export type PlayerRole = 'civilian' | 'undercover';
 
 export interface VisiblePlayer {
   seat: number;
@@ -31,7 +30,6 @@ export interface RoomState {
   currentSpeaker?: number;
   speeches: SpeechRecord[];
   mySeat?: number;
-  myRole?: PlayerRole;
   myWord?: string;
   isHost: boolean;
   deadlineTs?: number;
@@ -52,7 +50,7 @@ export interface GameEndState {
     rolesBySeat: Array<{
       seat: number;
       nickname: string;
-      role: PlayerRole;
+      role: Winner;
       isAlive: boolean;
     }>;
     words: {

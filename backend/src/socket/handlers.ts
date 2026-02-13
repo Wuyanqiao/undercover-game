@@ -217,13 +217,12 @@ async function destroyRoom(io: Server, roomId: string): Promise<void> {
 
 function buildAIContext(room: RoomState, seat: SeatNumber): AIContext {
   const player = Game.getPlayer(room, seat);
-  if (!player || !player.role || !player.word) {
-    throw new Error(`AI context missing role/word for seat ${seat}`);
+  if (!player || !player.word) {
+    throw new Error(`AI context missing word for seat ${seat}`);
   }
 
   return {
     mySeat: seat,
-    myRole: player.role,
     myWord: player.word,
     round: room.round,
     speeches: room.speeches,

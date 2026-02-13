@@ -78,7 +78,6 @@ export interface VisibleState {
   currentSpeaker?: SeatNumber;
   speeches: SpeechRecord[];
   mySeat?: SeatNumber;
-  myRole?: PlayerRole;
   myWord?: string;
   isHost: boolean;
   deadlineTs?: number;
@@ -111,7 +110,6 @@ export interface GameEndPayload {
 
 export interface AIContext {
   mySeat: SeatNumber;
-  myRole: PlayerRole;
   myWord: string;
   round: number;
   speeches: SpeechRecord[];

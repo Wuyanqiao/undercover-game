@@ -232,34 +232,22 @@ function validateWordPairJson(input: unknown): WordPair | null {
   return { civilian, undercover };
 }
 
-const fallbackCivilianSpeech = [
-  '它常见但别太直白，我先装糊涂。',
-  '这词不难猜，但我先给点烟雾弹。',
-  '我想到日常场景，细节先藏一半。',
-  '它很接地气，我先说个绕弯线索。',
-  '这个词像老熟人，我先假装不熟。'
+const fallbackSpeechPool = [
+  '我先给个模糊线索，别急着定论。',
+  '这个词挺日常，我先说半句。',
+  '我先描述场景，细节先藏着。',
+  '这轮先稳一点，别太直给。',
+  '我先说个边缘特征，留点空间。'
 ];
 
-const fallbackUndercoverSpeech = [
-  '我先说个安全描述，别问太细。',
-  '这词我有感觉，但先走中庸路线。',
-  '我懂一点点，先说得像懂很多。',
-  '我这波发言主打一个稳中带偏。',
-  '请相信我的胡说八道有理有据。'
-];
-
-const diversifiedCivilianSpeech = [
+const diversifiedSpeechPool = [
   '我给个生活线索，但先不点破。',
   '它挺常见，我先说一半藏一半。',
   '这词有画面感，我先打个马虎眼。',
   '先给模糊方向，细节暂时保留。',
-  '我先绕着说，别急着对号入座。'
-];
-
-const diversifiedUndercoverSpeech = [
+  '我先绕着说，别急着对号入座。',
   '我先贴边描述，稳一点再说。',
   '这轮先走中间位，别太上头。',
-  '我先给安全线索，不把话说满。',
   '先顺着大家思路，再慢慢观察。',
   '这句先求稳，信息别给太死。'
 ];
@@ -331,7 +319,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”玩家。发言要满足：1) 与自己词语语义相关；2) 带一点误导性，不要太直接；3) 有轻微幽默感；4) 控制在30字内。只输出 JSON，不要解释或 markdown。JSON schema: {"speech":"string<=30字"}。'
+              '你是“谁是卧底”玩家。你不知道自己是平民还是卧底。发言要满足：1) 与自己词语语义相关；2) 带一点误导性，不要太直接；3) 有轻微幽默感；4) 控制在30字内。只输出 JSON，不要解释或 markdown。JSON schema: {"speech":"string<=30字"}。'
           },
           {
             role: 'user',
@@ -365,7 +353,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”玩家。请在保持策略性的同时，不要每轮都给出绝对判断，必要时可保守投票或弃权，以提高局内博弈轮次。只输出 JSON，不要解释或 markdown。JSON schema: {"vote": number}，其中0为弃权，其他必须是存活座位号。'
+              '你是“谁是卧底”玩家。你不知道自己是平民还是卧底，请结合公开发言判断并投票。必要时可保守投票或弃权。只输出 JSON，不要解释或 markdown。JSON schema: {"vote": number}，其中0为弃权，其他必须是存活座位号。'
           },
           {
             role: 'user',
@@ -406,7 +394,7 @@ export class AIClient {
 
     return [
       `你是座位${context.mySeat}`,
-      `你的身份: ${context.myRole === 'civilian' ? '平民' : '卧底'}`,
+      '你的身份: 未知（你自己也不确定）',
       `你看到的词: ${context.myWord}`,
       `当前轮次: ${context.round}`,
       `存活座位: ${context.aliveSeats.join(', ')}`,
@@ -422,7 +410,7 @@ export class AIClient {
 
     return [
       `你是座位${context.mySeat}`,
-      `你的身份: ${context.myRole === 'civilian' ? '平民' : '卧底'}`,
+      '你的身份: 未知（你自己也不确定）',
       `你看到的词: ${context.myWord}`,
       `当前轮次: ${context.round}`,
       `存活座位: ${context.aliveSeats.join(', ')}`,
@@ -432,8 +420,7 @@ export class AIClient {
   }
 
   private fallbackSpeech(context: AIContext): string {
-    const list = context.myRole === 'civilian' ? fallbackCivilianSpeech : fallbackUndercoverSpeech;
-    return list[Math.floor(Math.random() * list.length)];
+    return fallbackSpeechPool[Math.floor(Math.random() * fallbackSpeechPool.length)];
   }
 
   private ensureDistinctSpeech(speech: string, context: AIContext): string {
@@ -467,9 +454,7 @@ export class AIClient {
   }
 
   private buildSpeechCandidates(context: AIContext): string[] {
-    const roleSpecific = context.myRole === 'civilian' ? diversifiedCivilianSpeech : diversifiedUndercoverSpeech;
-    const roleFallback = context.myRole === 'civilian' ? fallbackCivilianSpeech : fallbackUndercoverSpeech;
-    const candidates = [...roleSpecific, ...roleFallback]
+    const candidates = [...diversifiedSpeechPool, ...fallbackSpeechPool]
       .map((item) => item.trim().replace(/\s+/g, ' ').slice(0, 30))
       .filter((item) => item.length > 0);
 

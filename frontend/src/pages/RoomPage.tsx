@@ -602,19 +602,14 @@ function RoomPage() {
         )}
       </div>
 
-      {roomState.phase !== 'LOBBY' && roomState.myRole && (
+      {roomState.phase !== 'LOBBY' && roomState.myWord && (
         <div className="my-info">
-          <h3>我的身份信息</h3>
-          <div className="role-info">
-            <div className="role-label">身份</div>
-            <div className={`role-value ${roomState.myRole}`}>
-              {roomState.myRole === 'civilian' ? '平民' : '卧底'}
-            </div>
-          </div>
+          <h3>我的线索信息</h3>
           <div className="role-info role-info-word">
             <div className="role-label">你的词</div>
             <div className="word-value">{roomState.myWord}</div>
           </div>
+          <div className="meta-line">身份未知，请根据发言判断自己和他人的身份。</div>
         </div>
       )}
 

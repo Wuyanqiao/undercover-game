@@ -462,7 +462,6 @@ export function buildVisibleState(room: RoomState, viewerSeat?: SeatNumber): Vis
     currentSpeaker: room.currentSpeaker,
     speeches: room.speeches,
     mySeat: me?.seat,
-    myRole: me?.role,
     myWord: me?.word,
     isHost: me?.seat === room.hostSeat,
     deadlineTs: room.deadlineTs,
