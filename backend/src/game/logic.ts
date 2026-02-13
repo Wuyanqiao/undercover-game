@@ -61,6 +61,7 @@ export function createRoom(roomId: string, hostNickname: string, socketId: strin
     id: roomId,
     hostSeat: 1,
     targetPlayerCount: DEFAULT_TARGET_PLAYER_COUNT,
+    isLocked: false,
     phase: 'LOBBY',
     round: 0,
     players: [host],
@@ -144,6 +145,11 @@ export function canSetTargetPlayerCount(room: RoomState, nextTarget: number): { 
 
 export function setTargetPlayerCount(room: RoomState, nextTarget: number): void {
   room.targetPlayerCount = normalizeTargetPlayerCount(nextTarget);
+  touch(room);
+}
+
+export function setRoomLocked(room: RoomState, locked: boolean): void {
+  room.isLocked = locked;
   touch(room);
 }
 
@@ -429,6 +435,7 @@ export function buildVisibleState(room: RoomState, viewerSeat?: SeatNumber): Vis
   return {
     roomId: room.id,
     targetPlayerCount: room.targetPlayerCount,
+    isLocked: room.isLocked,
     players: [...room.players]
       .sort((a, b) => a.seat - b.seat)
       .map((p) => ({

@@ -23,6 +23,7 @@ export interface SpeechRecord {
 export interface RoomState {
   roomId: string;
   targetPlayerCount: number;
+  isLocked: boolean;
   players: VisiblePlayer[];
   phase: GamePhase;
   round: number;
@@ -77,6 +78,7 @@ interface StoreState {
   startGame: () => void;
   restartGame: () => void;
   setTargetPlayerCount: (targetPlayerCount: number) => void;
+  setRoomLocked: (locked: boolean) => void;
   speak: (text: string) => void;
   vote: (toSeat: number) => void;
   clearError: () => void;
@@ -262,6 +264,14 @@ export const useGameStore = create<StoreState>((set, get) => ({
       return;
     }
     socket.emit('room:target:set', { targetPlayerCount });
+  },
+
+  setRoomLocked: (locked: boolean) => {
+    const socket = get().socket;
+    if (!socket) {
+      return;
+    }
+    socket.emit('room:lock', { locked });
   },
 
   speak: (text: string) => {

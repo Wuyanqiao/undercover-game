@@ -48,6 +48,7 @@ const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 function ensureRoomShape(room: RoomState): void {
   room.targetPlayerCount = Game.normalizeTargetPlayerCount(room.targetPlayerCount ?? Game.DEFAULT_TARGET_PLAYER_COUNT);
+  room.isLocked = Boolean(room.isLocked);
 }
 
 function roomChannel(roomId: string): string {
@@ -613,6 +614,10 @@ export function setupSocketHandlers(io: Server): void {
         emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
         return;
       }
+      if (room.isLocked) {
+        emitError(socket, '房间已上锁，暂不允许加入', 'ROOM_LOCKED');
+        return;
+      }
       if (room.phase !== 'LOBBY') {
         emitError(socket, '游戏已开始，无法加入', 'GAME_ALREADY_STARTED');
         return;
@@ -717,6 +722,39 @@ export function setupSocketHandlers(io: Server): void {
       if (room.phase === 'SPEAKING') {
         await processAISpeaking(io, room.id);
       }
+    });
+
+    socket.on('room:lock', async (payload: { locked?: boolean }) => {
+      if (!allowSocketMessage(socket.id)) {
+        emitError(socket, '操作过于频繁', 'RATE_LIMIT');
+        return;
+      }
+
+      const session = socketSessions.get(socket.id);
+      if (!session) {
+        emitError(socket, '你还未加入房间', 'NOT_IN_ROOM');
+        return;
+      }
+
+      const room = await getRoom(session.roomId);
+      if (!room) {
+        emitError(socket, '房间不存在', 'ROOM_NOT_FOUND');
+        return;
+      }
+
+      if (room.hostSeat !== session.seat) {
+        emitError(socket, '只有房主可以锁房/开房', 'NOT_HOST');
+        return;
+      }
+
+      if (room.phase !== 'LOBBY' && room.phase !== 'END') {
+        emitError(socket, '仅可在准备阶段或结算后锁房/开房', 'CANNOT_LOCK_NOW');
+        return;
+      }
+
+      const locked = Boolean(payload.locked);
+      Game.setRoomLocked(room, locked);
+      await syncAndBroadcast(io, room);
     });
 
     socket.on('room:target:set', async (payload: { targetPlayerCount?: number }) => {

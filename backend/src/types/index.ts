@@ -37,6 +37,7 @@ export interface RoomState {
   id: string;
   hostSeat: SeatNumber;
   targetPlayerCount: number;
+  isLocked: boolean;
   phase: GamePhase;
   round: number;
   players: PlayerState[];
@@ -68,6 +69,7 @@ export interface VisiblePlayer {
 export interface VisibleState {
   roomId: string;
   targetPlayerCount: number;
+  isLocked: boolean;
   players: VisiblePlayer[];
   phase: GamePhase;
   round: number;

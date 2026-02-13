@@ -34,6 +34,7 @@ function RoomPage() {
     startGame,
     restartGame,
     setTargetPlayerCount,
+    setRoomLocked,
     speak,
     vote
   } = useGameStore();
@@ -115,7 +116,7 @@ function RoomPage() {
 
         <div className="action-section">
           <h3>通过邀请链接加入</h3>
-          <p style={{ marginBottom: 12, color: '#666' }}>请输入昵称后即可进入房间。</p>
+          <p className="join-hint">请输入昵称后即可进入房间。</p>
           <input
             className="speak-input"
             placeholder="输入昵称（最多12字）"
@@ -130,7 +131,7 @@ function RoomPage() {
           >
             立即加入
           </button>
-          <button className="leave-btn" style={{ marginTop: 12, width: '100%' }} onClick={() => navigate('/')}>
+          <button className="leave-btn leave-btn-full" onClick={() => navigate('/')}>
             返回首页
           </button>
         </div>
@@ -148,6 +149,10 @@ function RoomPage() {
   const handleLeave = () => {
     leaveRoom();
     navigate('/');
+  };
+
+  const toggleRoomLock = () => {
+    setRoomLocked(!roomState.isLocked);
   };
 
   const inviteLink = `${window.location.origin}/#/room/${roomState.roomId}`;
@@ -169,18 +174,21 @@ function RoomPage() {
         <div>
           <span className={`phase-badge ${roomState.phase}`}>{PHASE_TEXT[roomState.phase] ?? roomState.phase}</span>
           {roomState.phase !== 'LOBBY' && roomState.phase !== 'END' && (
-            <span style={{ marginLeft: 12, color: '#666' }}>第 {roomState.round} 轮</span>
+            <span className="round-label">第 {roomState.round} 轮</span>
           )}
         </div>
         {timeLeft !== null && roomState.phase !== 'END' && (
           <div className="countdown">剩余时间: {timeLeft} 秒</div>
         )}
         {roomState.phase === 'LOBBY' && (
-          <div style={{ marginTop: 8, fontSize: 13, color: '#666', wordBreak: 'break-all' }}>
+          <div className="meta-line invite-line">
             邀请链接: {inviteLink}
           </div>
         )}
-        <div style={{ marginTop: 8, fontSize: 13, color: '#666' }}>本房间目标人数: {roomState.targetPlayerCount}</div>
+        <div className="meta-line">本房间目标人数: {roomState.targetPlayerCount}</div>
+        <div className={`meta-line lock-state ${roomState.isLocked ? 'locked' : 'open'}`}>
+          房间状态: {roomState.isLocked ? '已上锁（禁止新玩家加入）' : '开放中'}
+        </div>
       </div>
 
       {roomState.phase !== 'LOBBY' && roomState.myRole && (
@@ -192,17 +200,17 @@ function RoomPage() {
               {roomState.myRole === 'civilian' ? '平民' : '卧底'}
             </div>
           </div>
-          <div className="role-info" style={{ marginTop: 12 }}>
-            <div className="role-label">你的词</div>
-            <div className="word-value">{roomState.myWord}</div>
-          </div>
+            <div className="role-info role-info-word">
+              <div className="role-label">你的词</div>
+              <div className="word-value">{roomState.myWord}</div>
+            </div>
         </div>
       )}
 
       {voteResult && (
-        <div className="action-section" style={{ marginBottom: 12 }}>
+        <div className="action-section action-section-tight">
           <h3>本轮投票结果</h3>
-          <p style={{ color: '#555' }}>
+          <p className="vote-result-text">
             {voteResult.eliminatedSeat
               ? `淘汰座位 ${voteResult.eliminatedSeat}`
               : voteResult.tie
@@ -256,12 +264,15 @@ function RoomPage() {
                     </button>
                   </div>
                 </div>
+                <button className="room-lock-btn" onClick={toggleRoomLock}>
+                  {roomState.isLocked ? '开房（允许加入）' : '锁房（禁止加入）'}
+                </button>
                 <button className="start-btn" onClick={restartGame}>
                   再来一局
                 </button>
               </>
             ) : (
-              <div className="waiting-message" style={{ marginBottom: 10 }}>
+              <div className="waiting-message waiting-message-gap">
                 等待房主选择是否再来一局...
               </div>
             )}
@@ -298,7 +309,7 @@ function RoomPage() {
               {!player.isAI && !player.connected && player.isAlive && <div className="ai-badge">离线</div>}
               {!player.isAlive && <div className="dead-badge">已淘汰</div>}
               <div className="nickname">{player.nickname}</div>
-              {me && <div style={{ fontSize: 12, color: '#4a90d9' }}>(你)</div>}
+              {me && <div className="me-tag">(你)</div>}
             </div>
           );
         })}
@@ -306,7 +317,7 @@ function RoomPage() {
 
       {roomState.phase === 'LOBBY' && roomState.isHost && (
         <div className="action-section">
-          <h3>房间人数设置</h3>
+          <h3>房间控制台</h3>
           <div className="capacity-control">
             <label htmlFor="targetCountLobby">目标人数（4-12）</label>
             <div className="capacity-row">
@@ -323,6 +334,9 @@ function RoomPage() {
               </button>
             </div>
           </div>
+          <button className="room-lock-btn" onClick={toggleRoomLock}>
+            {roomState.isLocked ? '开房（允许加入）' : '锁房（禁止加入）'}
+          </button>
           <button className="start-btn" onClick={startGame}>
             开始游戏（真人 {roomState.players.filter((player) => !player.isAI).length}/{roomState.targetPlayerCount}）
           </button>
@@ -330,7 +344,9 @@ function RoomPage() {
       )}
 
       {roomState.phase === 'LOBBY' && !roomState.isHost && (
-        <div className="waiting-message">等待房主开始游戏...</div>
+        <div className="waiting-message">
+          {roomState.isLocked ? '房间已上锁，等待房主开始游戏...' : '等待房主开始游戏...'}
+        </div>
       )}
 
       {myTurn && (
