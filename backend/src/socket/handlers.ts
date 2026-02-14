@@ -231,6 +231,7 @@ function buildAIContext(room: RoomState, seat: SeatNumber): AIContext {
   return {
     mySeat: seat,
     myWord: player.word,
+    wordHint: room.wordHint,
     round: room.round,
     speeches: room.speeches,
     aliveSeats: Game.getAliveSeats(room),

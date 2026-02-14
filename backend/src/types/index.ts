@@ -47,12 +47,15 @@ export interface AIPrivateMemory {
   notes: string[];
   usedSpeeches: string[];
   suspicionBySeat: Partial<Record<SeatNumber, number>>;
+  mainstreamBySeat: Partial<Record<SeatNumber, number>>;
+  divergenceBySeat: Partial<Record<SeatNumber, number>>;
   selfRoleBelief: RoleBelief;
   camouflageScore: number;
   receivedVotesLastRound: number;
   consensusTargetSeat?: SeatNumber;
   lastVote?: VoteTarget;
   reviewedSpeechCount: number;
+  lastProfiledRound?: number;
 }
 
 export type AIPrivateMemoryBySeat = Record<string, AIPrivateMemory>;
@@ -92,6 +95,8 @@ export interface AIMemorySnapshot {
   notes: string[];
   usedSpeeches: string[];
   suspicionBySeat: Partial<Record<SeatNumber, number>>;
+  mainstreamBySeat: Partial<Record<SeatNumber, number>>;
+  divergenceBySeat: Partial<Record<SeatNumber, number>>;
   selfRoleBelief: RoleBelief;
   camouflageScore: number;
   receivedVotesLastRound: number;
@@ -153,6 +158,7 @@ export interface GameEndPayload {
 export interface AIContext {
   mySeat: SeatNumber;
   myWord: string;
+  wordHint?: string;
   round: number;
   speeches: SpeechRecord[];
   aliveSeats: SeatNumber[];
