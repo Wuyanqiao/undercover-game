@@ -1,5 +1,4 @@
 import { config } from '../config';
-import { PickedWordPair, WordPair, createWordPairKey, getRandomWordPair } from '../game/words';
 import { logger } from '../logger';
 import { AIContext, SeatNumber, VoteTarget } from '../types';
 
@@ -180,10 +179,6 @@ function validateSpeechJson(input: unknown): string | null {
   return normalized || null;
 }
 
-function normalizeSpeechText(value: string): string {
-  return value.trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
 function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget | null {
   if (!input || typeof input !== 'object') {
     return null;
@@ -205,52 +200,176 @@ function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget 
   return null;
 }
 
-function sanitizeGameWord(raw: string): string {
-  return raw.trim().replace(/\s+/g, '').replace(/[，。！？、,.!?:：；;"'“”‘’`]/g, '').slice(0, 8);
-}
-
-function validateWordPairJson(input: unknown): WordPair | null {
-  if (!input || typeof input !== 'object') {
-    return null;
-  }
-
-  const civilianRaw = (input as { civilian?: unknown }).civilian;
-  const undercoverRaw = (input as { undercover?: unknown }).undercover;
-  if (typeof civilianRaw !== 'string' || typeof undercoverRaw !== 'string') {
-    return null;
-  }
-
-  const civilian = sanitizeGameWord(civilianRaw);
-  const undercover = sanitizeGameWord(undercoverRaw);
-  if (!civilian || !undercover) {
-    return null;
-  }
-  if (civilian === undercover) {
-    return null;
-  }
-
-  return { civilian, undercover };
-}
-
-const fallbackSpeechPool = [
-  '我先给个模糊线索，别急着定论。',
-  '这个词挺日常，我先说半句。',
-  '我先描述场景，细节先藏着。',
-  '这轮先稳一点，别太直给。',
-  '我先说个边缘特征，留点空间。'
+const precisionSpeechPool = [
+  '我给侧面细节，先看动作线。',
+  '我偏向用途线索，不给直名。',
+  '我先给场景，不给核心词。',
+  '先看使用方式，再听你们补。',
+  '我给结构线索，留一手。'
 ];
 
-const diversifiedSpeechPool = [
-  '我给个生活线索，但先不点破。',
-  '它挺常见，我先说一半藏一半。',
-  '这词有画面感，我先打个马虎眼。',
-  '先给模糊方向，细节暂时保留。',
-  '我先绕着说，别急着对号入座。',
-  '我先贴边描述，稳一点再说。',
-  '这轮先走中间位，别太上头。',
-  '先顺着大家思路，再慢慢观察。',
-  '这句先求稳，信息别给太死。'
+const chaosSpeechPool = [
+  '我先反向发言，别被直觉带跑。',
+  '这句故意留白，先看谁着急。',
+  '我先绕一圈，让你们先站队。',
+  '我先抛烟雾，不急着落点。',
+  '我先走偏锋，看谁先对号入座。'
 ];
+
+const sharedSpeechPool = [
+  '我给生活画面，不给答案词。',
+  '我先放半句，让信息继续流动。',
+  '我先贴边说，核心先不交。',
+  '这轮先稳，别急着锁人。',
+  '先给你们一层外壳线索。'
+];
+
+const SEMANTIC_REWRITE_RULES: Array<{ pattern: RegExp; replacement: string }> = [
+  { pattern: /[，。！？、,.!?:：；"'“”‘’`（）()\[\]{}<>\-]/g, replacement: '' },
+  { pattern: /\s+/g, replacement: '' },
+  { pattern: /(先来|先给|先说|先讲|我先)/g, replacement: '先' },
+  { pattern: /(模糊|含糊|笼统|朦胧)/g, replacement: '模糊' },
+  { pattern: /(线索|提示|信号|方向|信息)/g, replacement: '线索' },
+  { pattern: /(日常|平时|生活里|生活中)/g, replacement: '日常' },
+  { pattern: /(别急|先别|不要急|别着急)/g, replacement: '别急' },
+  { pattern: /(观察|留意|看看|瞅瞅)/g, replacement: '观察' },
+  { pattern: /(细节|特征|特点)/g, replacement: '细节' },
+  { pattern: /(留白|藏着|保留|收着)/g, replacement: '留白' },
+  { pattern: /(绕着说|绕一圈|拐着说)/g, replacement: '绕说' }
+];
+
+const SEMANTIC_STOP_WORDS = [
+  '这轮',
+  '这一轮',
+  '这句',
+  '我',
+  '你们',
+  '先',
+  '一个',
+  '一下',
+  '真的',
+  '就是',
+  '然后',
+  '现在'
+];
+
+function normalizeSpeechText(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').slice(0, 30);
+}
+
+function normalizeForSemanticCompare(value: string): string {
+  let current = normalizeSpeechText(value).toLowerCase();
+  for (const rule of SEMANTIC_REWRITE_RULES) {
+    current = current.replace(rule.pattern, rule.replacement);
+  }
+  for (const token of SEMANTIC_STOP_WORDS) {
+    current = current.replace(new RegExp(token, 'g'), '');
+  }
+  return current;
+}
+
+function toBigrams(value: string): Set<string> {
+  const source = value.trim();
+  if (source.length <= 1) {
+    return new Set(source ? [source] : []);
+  }
+
+  const grams = new Set<string>();
+  for (let index = 0; index + 1 < source.length; index += 1) {
+    grams.add(source.slice(index, index + 2));
+  }
+  return grams;
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) {
+    return 1;
+  }
+
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) {
+      intersection += 1;
+    }
+  }
+
+  const union = a.size + b.size - intersection;
+  return union <= 0 ? 0 : intersection / union;
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) {
+    return 0;
+  }
+  if (!a) {
+    return b.length;
+  }
+  if (!b) {
+    return a.length;
+  }
+
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const matrix: number[][] = Array.from({ length: rows }, () => Array<number>(cols).fill(0));
+
+  for (let row = 0; row < rows; row += 1) {
+    matrix[row][0] = row;
+  }
+  for (let col = 0; col < cols; col += 1) {
+    matrix[0][col] = col;
+  }
+
+  for (let row = 1; row < rows; row += 1) {
+    for (let col = 1; col < cols; col += 1) {
+      const cost = a[row - 1] === b[col - 1] ? 0 : 1;
+      matrix[row][col] = Math.min(
+        matrix[row - 1][col] + 1,
+        matrix[row][col - 1] + 1,
+        matrix[row - 1][col - 1] + cost
+      );
+    }
+  }
+
+  return matrix[rows - 1][cols - 1];
+}
+
+function isSemanticallyEquivalent(left: string, right: string): boolean {
+  const a = normalizeForSemanticCompare(left);
+  const b = normalizeForSemanticCompare(right);
+
+  if (!a || !b) {
+    return false;
+  }
+  if (a === b) {
+    return true;
+  }
+
+  const shortLength = Math.min(a.length, b.length);
+  if (shortLength >= 4 && (a.includes(b) || b.includes(a))) {
+    return true;
+  }
+
+  const bigramScore = jaccardSimilarity(toBigrams(a), toBigrams(b));
+  if (bigramScore >= 0.68) {
+    return true;
+  }
+
+  const distance = levenshteinDistance(a, b);
+  const maxLength = Math.max(a.length, b.length);
+  const ratio = maxLength === 0 ? 0 : 1 - distance / maxLength;
+  return ratio >= 0.8;
+}
+
+function formatSuspicionSummary(context: AIContext): string {
+  const entries = Object.entries(context.memory?.suspicionBySeat ?? {})
+    .map(([seat, score]) => ({ seat: Number(seat), score: Number(score) }))
+    .filter((item) => Number.isFinite(item.seat) && Number.isFinite(item.score) && item.seat !== context.mySeat)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4)
+    .map((item) => `${item.seat}:${item.score}`);
+
+  return entries.length > 0 ? entries.join(', ') : '暂无明确高疑位';
+}
 
 export class AIClient {
   private readonly adapter: ModelAdapter | null;
@@ -262,56 +381,11 @@ export class AIClient {
     this.adapter = this.buildAdapter();
   }
 
-  async generateWordPair(lastKey?: string): Promise<PickedWordPair> {
-    const useGeneratedPair = Boolean(this.adapter) && Math.random() < 0.5;
-    if (!useGeneratedPair || !this.adapter) {
-      if (!this.adapter) {
-        this.logDisabledOnce();
-      }
-      return getRandomWordPair(lastKey);
-    }
-
-    return this.semaphore.use(async () => {
-      try {
-        const content = await this.adapter!.chat([
-          {
-            role: 'system',
-            content:
-              '你要给“谁是卧底”出一组有趣词对。要求：1) 两个词同一语义领域且易混淆；2) 日常常见，避免生僻；3) 不要完全同义；4) 每个词2~6字最佳。只输出 JSON，不要解释或 markdown。JSON schema: {"civilian":"平民词","undercover":"卧底词"}。'
-          },
-          {
-            role: 'user',
-            content: [
-              '请生成一组中文词对，风格轻松有趣，适合多人推理博弈。',
-              lastKey ? `上一局词对: ${lastKey.replace('|', ' / ')}，请避免重复。` : '这是本房间首局，可自由发挥。'
-            ].join('\n')
-          }
-        ]);
-
-        const parsed = extractJsonObject(content);
-        const pair = validateWordPairJson(parsed);
-        if (!pair) {
-          throw new Error('AI word pair JSON schema validation failed');
-        }
-
-        const key = createWordPairKey(pair);
-        if (lastKey && key === lastKey) {
-          throw new Error('AI generated duplicate word pair with last round');
-        }
-
-        return { pair, key };
-      } catch (error) {
-        logger.warn({ err: error }, 'AI word pair failed, fallback to built-in library');
-        return getRandomWordPair(lastKey);
-      }
-    });
-  }
-
   async generateSpeech(context: AIContext): Promise<string> {
     return this.semaphore.use(async () => {
       if (!this.adapter) {
         this.logDisabledOnce();
-        return this.fallbackSpeech(context);
+        return this.ensureDistinctSpeech(this.fallbackSpeech(context), context);
       }
 
       try {
@@ -319,7 +393,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”玩家。你不知道自己是平民还是卧底。发言要满足：1) 与自己词语语义相关；2) 带一点误导性，不要太直接；3) 有轻微幽默感；4) 控制在30字内。只输出 JSON，不要解释或 markdown。JSON schema: {"speech":"string<=30字"}。'
+              '你是“谁是卧底”AI玩家。必须遵守：1) 你不知道自己是平民还是卧底；2) 只能基于自己的私有记忆推理；3) 禁止重复任何历史发言，也禁止同义改写；4) 发言<=30字，贴合自己词语，带轻微误导但不直给。只输出 JSON，不要解释。JSON schema: {"speech":"string<=30字"}。'
           },
           {
             role: 'user',
@@ -353,7 +427,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”玩家。你不知道自己是平民还是卧底，请结合公开发言判断并投票。必要时可保守投票或弃权。只输出 JSON，不要解释或 markdown。JSON schema: {"vote": number}，其中0为弃权，其他必须是存活座位号。'
+              '你是“谁是卧底”AI玩家。你不知道自己是平民还是卧底。投票时必须坚持你的私有记忆与对立推理立场，不要与其他AI保持一致。只输出 JSON，不要解释或 markdown。JSON schema: {"vote": number}，其中0为弃权，其他必须是存活座位号。'
           },
           {
             role: 'user',
@@ -388,9 +462,9 @@ export class AIClient {
 
   private buildSpeechPrompt(context: AIContext): string {
     const speechLog = context.speeches
-      .filter((item) => item.round === context.round)
-      .map((item) => `座位${item.seat}: ${item.text}`)
+      .map((item) => `第${item.round}轮 座位${item.seat}: ${item.text}`)
       .join('\n');
+    const notes = context.memory?.notes.slice(-6).join(' | ') ?? '暂无';
 
     return [
       `你是座位${context.mySeat}`,
@@ -398,8 +472,12 @@ export class AIClient {
       `你看到的词: ${context.myWord}`,
       `当前轮次: ${context.round}`,
       `存活座位: ${context.aliveSeats.join(', ')}`,
-      speechLog ? `本轮已有发言:\n${speechLog}` : '你是本轮首个发言',
-      '请给出一句不超过30字的发言：要贴合词义、略带误导、稍微幽默，且不要复述本轮已有原句。'
+      context.memory ? `你的推理立场: ${context.memory.oppositionLabel}` : '你的推理立场: 默认中性',
+      context.memory?.rivalSeat ? `对立参考座位: ${context.memory.rivalSeat}` : '对立参考座位: 无',
+      `你的私有记忆: ${notes}`,
+      `你的私有嫌疑分布: ${formatSuspicionSummary(context)}`,
+      speechLog ? `公开发言记录:\n${speechLog}` : '暂无公开发言',
+      '输出一句30字内的新发言：必须与历史发言和同义句都不同。'
     ].join('\n');
   }
 
@@ -407,6 +485,7 @@ export class AIClient {
     const speechLog = context.speeches
       .map((item) => `第${item.round}轮 座位${item.seat}: ${item.text}`)
       .join('\n');
+    const notes = context.memory?.notes.slice(-6).join(' | ') ?? '暂无';
 
     return [
       `你是座位${context.mySeat}`,
@@ -414,71 +493,145 @@ export class AIClient {
       `你看到的词: ${context.myWord}`,
       `当前轮次: ${context.round}`,
       `存活座位: ${context.aliveSeats.join(', ')}`,
+      context.memory ? `你的推理立场: ${context.memory.oppositionLabel}` : '你的推理立场: 默认中性',
+      context.memory?.rivalSeat ? `对立参考座位: ${context.memory.rivalSeat}` : '对立参考座位: 无',
+      `你的私有记忆: ${notes}`,
+      `你的私有嫌疑分布: ${formatSuspicionSummary(context)}`,
+      context.memory?.lastVote !== undefined ? `你上一轮投票: ${context.memory.lastVote}` : '你上一轮投票: 无',
       speechLog ? `公开发言记录:\n${speechLog}` : '暂无公开发言',
-      '请投给你最怀疑的存活玩家，必要时可输出0弃权。投票只能是0或存活座位号。'
+      '请投给你最怀疑的存活玩家，必要时可输出0弃权。'
     ].join('\n');
   }
 
   private fallbackSpeech(context: AIContext): string {
-    return fallbackSpeechPool[Math.floor(Math.random() * fallbackSpeechPool.length)];
+    const candidates = this.buildSpeechCandidates(context);
+    if (candidates.length === 0) {
+      return this.buildEmergencySpeech(context);
+    }
+
+    const offset = (context.round * 29 + context.mySeat * 13) % candidates.length;
+    return candidates[offset];
   }
 
   private ensureDistinctSpeech(speech: string, context: AIContext): string {
-    const used = this.collectUsedSpeechKeys(context);
-    const normalized = speech.trim().replace(/\s+/g, ' ').slice(0, 30);
+    const usedCorpus = this.collectUsedSpeechCorpus(context);
+    const normalized = normalizeSpeechText(speech);
     if (!normalized) {
       return this.buildEmergencySpeech(context);
     }
-    if (!used.has(normalizeSpeechText(normalized))) {
+
+    if (this.isSpeechUnique(normalized, usedCorpus)) {
       return normalized;
     }
 
     for (const candidate of this.buildSpeechCandidates(context)) {
-      const key = normalizeSpeechText(candidate);
-      if (!used.has(key)) {
+      if (this.isSpeechUnique(candidate, usedCorpus)) {
         return candidate;
       }
     }
 
-    return this.buildEmergencySpeech(context);
+    return this.buildEmergencySpeech(context, usedCorpus);
   }
 
-  private collectUsedSpeechKeys(context: AIContext): Set<string> {
-    const used = new Set<string>();
-    for (const item of context.speeches) {
-      if (item.round === context.round || item.seat === context.mySeat) {
-        used.add(normalizeSpeechText(item.text));
+  private collectUsedSpeechCorpus(context: AIContext): string[] {
+    const corpus = [...context.speeches.map((item) => item.text), ...(context.memory?.usedSpeeches ?? [])]
+      .map((text) => normalizeSpeechText(text))
+      .filter((text) => Boolean(text));
+
+    return Array.from(new Set(corpus));
+  }
+
+  private isSpeechUnique(candidate: string, usedCorpus: string[]): boolean {
+    for (const history of usedCorpus) {
+      if (isSemanticallyEquivalent(candidate, history)) {
+        return false;
       }
     }
-    return used;
+    return true;
   }
 
   private buildSpeechCandidates(context: AIContext): string[] {
-    const candidates = [...diversifiedSpeechPool, ...fallbackSpeechPool]
-      .map((item) => item.trim().replace(/\s+/g, ' ').slice(0, 30))
-      .filter((item) => item.length > 0);
+    const strategyPool = context.memory?.strategy === 'chaos' ? chaosSpeechPool : precisionSpeechPool;
+    const suspectedSeat = this.pickMostSuspectedSeat(context);
 
-    if (candidates.length === 0) {
+    const dynamicPool = [
+      `第${context.round}轮我给侧线，先听全场。`,
+      `第${context.round}轮我给用途线，不报词名。`,
+      `我先做反向描述，重点看反应。`,
+      `我给一层外壳线索，内核暂留。`,
+      suspectedSeat ? `我先盯座${suspectedSeat}的反应，再补。` : `我先不落座位，继续观察。`,
+      context.memory?.rivalSeat
+        ? `我先和座${context.memory.rivalSeat}走反向逻辑。`
+        : `我先用独立记忆，不跟票。`
+    ];
+
+    const all = [...strategyPool, ...sharedSpeechPool, ...dynamicPool]
+      .map((item) => normalizeSpeechText(item))
+      .filter((item) => item.length > 0)
+      .map((item) => item.slice(0, 30));
+
+    if (all.length === 0) {
       return [];
     }
 
-    const offset = (context.round * 31 + context.mySeat * 17) % candidates.length;
-    return [...candidates.slice(offset), ...candidates.slice(0, offset)];
+    const offset = (context.round * 31 + context.mySeat * 17) % all.length;
+    return [...all.slice(offset), ...all.slice(0, offset)];
   }
 
-  private buildEmergencySpeech(context: AIContext): string {
-    return `第${context.round}轮${context.mySeat}号先给模糊线索`;
+  private buildEmergencySpeech(context: AIContext, usedCorpus: string[] = []): string {
+    const seeds = [
+      `第${context.round}轮${context.mySeat}号走侧写线`,
+      `第${context.round}轮${context.mySeat}号给反向线索`,
+      `第${context.round}轮${context.mySeat}号先留白`
+    ];
+
+    for (const seed of seeds) {
+      if (this.isSpeechUnique(seed, usedCorpus)) {
+        return seed;
+      }
+    }
+
+    return `第${context.round}轮${context.mySeat}号线索${context.round * 37 + context.mySeat}`;
+  }
+
+  private pickMostSuspectedSeat(context: AIContext): SeatNumber | undefined {
+    const entries = Object.entries(context.memory?.suspicionBySeat ?? {})
+      .map(([seat, score]) => ({ seat: Number(seat), score: Number(score) }))
+      .filter((item) => Number.isFinite(item.seat) && Number.isFinite(item.score) && item.seat !== context.mySeat)
+      .sort((a, b) => b.score - a.score);
+
+    return entries[0]?.seat;
   }
 
   private fallbackVote(context: AIContext): VoteTarget {
-    if (Math.random() < 0.2) {
-      return 0;
-    }
     const options = context.aliveSeats.filter((seat) => seat !== context.mySeat);
     if (options.length === 0) {
       return 0;
     }
-    return options[Math.floor(Math.random() * options.length)];
+
+    const suspicion = context.memory?.suspicionBySeat ?? {};
+    const sortedBySuspicion = [...options].sort((left, right) => {
+      const leftScore = suspicion[left] ?? 0;
+      const rightScore = suspicion[right] ?? 0;
+      if (rightScore !== leftScore) {
+        return rightScore - leftScore;
+      }
+      return left - right;
+    });
+
+    const topCandidate = sortedBySuspicion[0];
+    if ((suspicion[topCandidate] ?? 0) >= 1) {
+      return topCandidate;
+    }
+
+    if (Math.random() < 0.15) {
+      return 0;
+    }
+
+    if (context.memory?.strategy === 'chaos') {
+      return options[options.length - 1];
+    }
+    return options[0];
   }
 
   private logDisabledOnce(): void {

@@ -8,8 +8,7 @@ export interface PickedWordPair {
   key: string;
 }
 
-// 30+ word pairs for the game
-export const wordPairs: WordPair[] = [
+const curatedWordPairs: WordPair[] = [
   { civilian: '苹果', undercover: '梨' },
   { civilian: '牛奶', undercover: '豆浆' },
   { civilian: '篮球', undercover: '足球' },
@@ -42,8 +41,114 @@ export const wordPairs: WordPair[] = [
   { civilian: '春天', undercover: '秋天' },
   { civilian: '红包', undercover: '礼物' },
   { civilian: '饺子', undercover: '汤圆' },
-  { civilian: '筷子', undercover: '叉子' }
+  { civilian: '筷子', undercover: '叉子' },
+  { civilian: '地铁', undercover: '公交' },
+  { civilian: '吉他', undercover: '贝斯' },
+  { civilian: '手表', undercover: '怀表' },
+  { civilian: '白米饭', undercover: '糯米饭' },
+  { civilian: '滑雪', undercover: '滑冰' },
+  { civilian: '口红', undercover: '唇釉' },
+  { civilian: '小说', undercover: '散文' }
 ];
+
+const stylePrefixes = [
+  '清',
+  '浓',
+  '鲜',
+  '香',
+  '脆',
+  '软',
+  '甜',
+  '酸',
+  '辣',
+  '咸',
+  '冰',
+  '热',
+  '青',
+  '红',
+  '金',
+  '银',
+  '小',
+  '大'
+] as const;
+
+const ingredientRoots = [
+  '苹果',
+  '香蕉',
+  '草莓',
+  '橙子',
+  '葡萄',
+  '柠檬',
+  '芒果',
+  '桃子',
+  '蓝莓',
+  '樱桃',
+  '菠萝',
+  '椰子',
+  '抹茶',
+  '可可',
+  '奶油',
+  '芝士',
+  '蜂蜜',
+  '桂花',
+  '茉莉',
+  '玫瑰',
+  '酸奶',
+  '牛奶',
+  '米酒',
+  '乌梅'
+] as const;
+
+const variantSuffixes = ['汁', '茶', '露', '酱', '派', '卷', '片', '饼', '糕', '冻', '饮'] as const;
+
+function sanitizeWord(raw: string): string {
+  return raw.trim().replace(/\s+/g, '');
+}
+
+function dedupeWordPairs(input: WordPair[]): WordPair[] {
+  const seen = new Set<string>();
+  const result: WordPair[] = [];
+
+  for (const pair of input) {
+    const civilian = sanitizeWord(pair.civilian);
+    const undercover = sanitizeWord(pair.undercover);
+    if (!civilian || !undercover || civilian === undercover) {
+      continue;
+    }
+
+    const key = `${civilian}|${undercover}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push({ civilian, undercover });
+  }
+
+  return result;
+}
+
+function buildGeneratedWordPairs(): WordPair[] {
+  const generated: WordPair[] = [];
+
+  for (const prefix of stylePrefixes) {
+    for (const root of ingredientRoots) {
+      const stem = `${prefix}${root}`;
+      for (let index = 0; index + 1 < variantSuffixes.length; index += 1) {
+        generated.push({
+          civilian: `${stem}${variantSuffixes[index]}`,
+          undercover: `${stem}${variantSuffixes[index + 1]}`
+        });
+      }
+    }
+  }
+
+  return generated;
+}
+
+export const wordPairs: WordPair[] = dedupeWordPairs([...curatedWordPairs, ...buildGeneratedWordPairs()]);
+
+export const WORD_PAIR_COUNT = wordPairs.length;
 
 export function createWordPairKey(pair: WordPair): string {
   return `${pair.civilian}|${pair.undercover}`;

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { Server, Socket } from 'socket.io';
 import { aiClient } from '../ai/client';
+import { buildAIMemorySnapshot, refreshAIMemoryForRoom, rememberAISpeech, rememberAIVote } from '../ai/memory';
 import { config } from '../config';
 import * as Game from '../game/logic';
 import { logger } from '../logger';
@@ -226,7 +227,8 @@ function buildAIContext(room: RoomState, seat: SeatNumber): AIContext {
     myWord: player.word,
     round: room.round,
     speeches: room.speeches,
-    aliveSeats: Game.getAliveSeats(room)
+    aliveSeats: Game.getAliveSeats(room),
+    memory: buildAIMemorySnapshot(room, seat)
   };
 }
 
@@ -307,8 +309,9 @@ async function startGameRound(io: Server, room: RoomState): Promise<void> {
   if (!room.isVoiceRoom) {
     Game.fillAIToTarget(room);
   }
-  const pickedWordPair = await aiClient.generateWordPair(room.lastWordPairKey);
-  Game.dealRoles(room, pickedWordPair);
+  room.aiMemoryBySeat = {};
+  Game.dealRoles(room);
+  refreshAIMemoryForRoom(room);
   await syncAndBroadcast(io, room, true);
 
   Game.beginSpeakingPhase(room, 1);
@@ -333,6 +336,11 @@ async function submitSpeech(io: Server, room: RoomState, seat: SeatNumber, text:
   }
 
   const speech = Game.appendSpeech(room, seat, text);
+  const speaker = Game.getPlayer(room, seat);
+  if (speaker?.isAI) {
+    rememberAISpeech(room, seat, speech.text);
+  }
+
   io.to(roomChannel(room.id)).emit('game:speech', {
     seat: speech.seat,
     text: speech.text,
@@ -362,9 +370,8 @@ async function resolveVoting(io: Server, room: RoomState): Promise<void> {
   clearRoomTimer(room.id);
 
   const { tally, topSeats } = Game.tallyVotes(room);
-  const inTieBreak = room.tieBreak.active;
 
-  if (topSeats.length > 1 && !inTieBreak) {
+  if (topSeats.length > 1) {
     const tiePayload: VoteResultPayload = {
       tally,
       eliminatedSeat: null,
@@ -374,20 +381,19 @@ async function resolveVoting(io: Server, room: RoomState): Promise<void> {
     };
     io.to(roomChannel(room.id)).emit('game:vote:result', tiePayload);
 
-    await beginVoting(io, room, topSeats);
+    Game.beginSpeakingPhase(room, room.round + 1);
+    room.deadlineTs = now() + config.speechTimeoutSeconds * 1000;
+    await syncAndBroadcast(io, room, true);
+    scheduleRoomDeadline(io, room);
+    await processAISpeaking(io, room.id);
     return;
   }
 
-  let eliminatedSeat: SeatNumber;
-  if (topSeats.length > 1) {
-    eliminatedSeat = topSeats[Math.floor(Math.random() * topSeats.length)];
-  } else {
-    const fallbackSeat = Game.getAliveSeats(room)[0];
-    if (!topSeats[0] && !fallbackSeat) {
-      return;
-    }
-    eliminatedSeat = (topSeats[0] ?? fallbackSeat) as SeatNumber;
+  const fallbackSeat = Game.getAliveSeats(room)[0];
+  if (!topSeats[0] && !fallbackSeat) {
+    return;
   }
+  const eliminatedSeat = (topSeats[0] ?? fallbackSeat) as SeatNumber;
 
   Game.eliminatePlayer(room, eliminatedSeat);
 
@@ -395,8 +401,8 @@ async function resolveVoting(io: Server, room: RoomState): Promise<void> {
     tally,
     eliminatedSeat,
     round: room.round,
-    tie: topSeats.length > 1,
-    tieBreak: inTieBreak
+    tie: false,
+    tieBreak: false
   };
   io.to(roomChannel(room.id)).emit('game:vote:result', resultPayload);
 
@@ -438,7 +444,7 @@ async function processAISpeaking(io: Server, roomId: string): Promise<void> {
         break;
       }
 
-      let speech = '我先说一个模糊线索。';
+      let speech = `第${room.round}轮${player.seat}号给侧面线索`;
       try {
         speech = await aiClient.generateSpeech(buildAIContext(room, player.seat));
       } catch (error) {
@@ -485,6 +491,7 @@ async function processAIVotes(io: Server, roomId: string): Promise<void> {
       }
 
       Game.recordVote(room, player.seat, vote);
+      rememberAIVote(room, player.seat, vote);
     }
 
     await syncAndBroadcast(io, room);
@@ -728,6 +735,7 @@ export function setupSocketHandlers(io: Server): void {
       }
 
       Game.removeOrConvertHumanPlayer(room, activeSession.seat);
+      refreshAIMemoryForRoom(room);
       refreshPendingDestroy(room);
 
       await syncAndBroadcast(io, room);
@@ -1165,6 +1173,7 @@ export function setupSocketHandlers(io: Server): void {
               await deleteResumeRecord(stale.resumeJti);
             }
             Game.removeOrConvertHumanPlayer(room, stale.seat);
+            refreshAIMemoryForRoom(room);
             changed = true;
           }
 

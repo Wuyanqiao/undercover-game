@@ -1,17 +1,29 @@
 declare const __APP_VERSION__: string;
 
-interface SpeechRecognitionResultAlternative {
+interface SpeechRecognitionAlternative {
   transcript: string;
+  confidence: number;
 }
 
-interface SpeechRecognitionResultEntry {
-  [index: number]: SpeechRecognitionResultAlternative;
+interface SpeechRecognitionResult {
+  readonly length: number;
+  readonly isFinal: boolean;
+  [index: number]: SpeechRecognitionAlternative;
+}
+
+interface SpeechRecognitionResultList {
+  readonly length: number;
+  [index: number]: SpeechRecognitionResult;
 }
 
 interface SpeechRecognitionEvent extends Event {
-  readonly results: {
-    [index: number]: SpeechRecognitionResultEntry;
-  };
+  readonly resultIndex: number;
+  readonly results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  readonly error: string;
+  readonly message: string;
 }
 
 interface SpeechRecognition extends EventTarget {
@@ -19,8 +31,9 @@ interface SpeechRecognition extends EventTarget {
   interimResults: boolean;
   lang: string;
   maxAlternatives: number;
+  onstart: ((event: Event) => void) | null;
   onresult: ((event: SpeechRecognitionEvent) => void) | null;
-  onerror: ((event: Event) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
   onend: ((event: Event) => void) | null;
   start: () => void;
   stop: () => void;

@@ -6,6 +6,8 @@ export type PlayerRole = 'civilian' | 'undercover';
 
 export type Winner = 'civilian' | 'undercover';
 
+export type AIStrategy = 'precision' | 'chaos';
+
 export type GamePhase =
   | 'LOBBY'
   | 'DEAL'
@@ -33,6 +35,19 @@ export interface SpeechRecord {
   ts: number;
 }
 
+export interface AIPrivateMemory {
+  strategy: AIStrategy;
+  oppositionLabel: string;
+  rivalSeat?: SeatNumber;
+  notes: string[];
+  usedSpeeches: string[];
+  suspicionBySeat: Partial<Record<SeatNumber, number>>;
+  lastVote?: VoteTarget;
+  reviewedSpeechCount: number;
+}
+
+export type AIPrivateMemoryBySeat = Record<string, AIPrivateMemory>;
+
 export interface RoomState {
   id: string;
   hostSeat: SeatNumber;
@@ -53,10 +68,21 @@ export interface RoomState {
     active: boolean;
     candidates: SeatNumber[];
   };
+  aiMemoryBySeat?: AIPrivateMemoryBySeat;
   winner?: Winner;
   createdAt: number;
   updatedAt: number;
   pendingDestroyAt?: number;
+}
+
+export interface AIMemorySnapshot {
+  strategy: AIStrategy;
+  oppositionLabel: string;
+  rivalSeat?: SeatNumber;
+  notes: string[];
+  usedSpeeches: string[];
+  suspicionBySeat: Partial<Record<SeatNumber, number>>;
+  lastVote?: VoteTarget;
 }
 
 export interface VisiblePlayer {
@@ -114,4 +140,5 @@ export interface AIContext {
   round: number;
   speeches: SpeechRecord[];
   aliveSeats: SeatNumber[];
+  memory?: AIMemorySnapshot;
 }

@@ -38,7 +38,12 @@ function RoomPage() {
   const [targetCountDraft, setTargetCountDraft] = useState(4);
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [voiceInterimText, setVoiceInterimText] = useState('');
+  const [voiceInputHint, setVoiceInputHint] = useState('点击按钮可将语音转换为文字');
+  const [voiceInputError, setVoiceInputError] = useState<string | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const shouldKeepListeningRef = useRef(false);
+  const myTurnRef = useRef(false);
   const [voiceMicReady, setVoiceMicReady] = useState(false);
   const [voiceCanSpeak, setVoiceCanSpeak] = useState(false);
   const [voiceRoomError, setVoiceRoomError] = useState<string | null>(null);
@@ -109,6 +114,33 @@ function RoomPage() {
     }
     setTargetCountDraft(roomState.targetPlayerCount);
   }, [roomState?.targetPlayerCount]);
+
+  const appendSpeechTranscript = useCallback((fragment: string) => {
+    const normalized = fragment.trim().replace(/\s+/g, ' ');
+    if (!normalized) {
+      return;
+    }
+
+    setSpeechInput((previous) => `${previous} ${normalized}`.trim().replace(/\s+/g, ' ').slice(0, 30));
+  }, []);
+
+  const mapRecognitionError = useCallback((errorCode: string): string => {
+    switch (errorCode) {
+      case 'not-allowed':
+      case 'service-not-allowed':
+        return '语音输入权限被拒绝，请在浏览器中开启麦克风权限';
+      case 'audio-capture':
+        return '未检测到可用麦克风，请检查设备连接';
+      case 'network':
+        return '语音识别网络异常，请稍后重试';
+      case 'no-speech':
+        return '没有识别到语音，已继续监听';
+      case 'aborted':
+        return '语音输入已停止';
+      default:
+        return '语音识别失败，请重试';
+    }
+  }, []);
 
   const clearVoiceResources = useCallback(() => {
     for (const connection of peerConnectionsRef.current.values()) {
@@ -419,48 +451,119 @@ function RoomPage() {
   useEffect(() => {
     const RecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!RecognitionCtor) {
+      setVoiceSupported(false);
+      setVoiceInputHint('当前浏览器不支持语音输入');
       return;
     }
 
     const recognition = new RecognitionCtor();
     recognition.lang = 'zh-CN';
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 3;
+    recognition.onstart = () => {
+      setVoiceInputError(null);
+      setVoiceInputHint('正在听写，请说话...');
+      setIsListening(true);
+    };
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = event.results?.[0]?.[0]?.transcript;
-      if (!transcript) {
-        return;
+      let finalTranscript = '';
+      let interimTranscript = '';
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result?.[0]?.transcript?.trim();
+        if (!transcript) {
+          continue;
+        }
+
+        if (result.isFinal) {
+          finalTranscript += ` ${transcript}`;
+        } else {
+          interimTranscript += ` ${transcript}`;
+        }
       }
-      setSpeechInput((prev) => `${prev} ${transcript}`.trim().replace(/\s+/g, ' ').slice(0, 30));
+
+      if (finalTranscript.trim()) {
+        appendSpeechTranscript(finalTranscript);
+      }
+
+      const interim = interimTranscript.trim().replace(/\s+/g, ' ');
+      setVoiceInterimText(interim);
+      if (interim) {
+        setVoiceInputHint(`识别中：${interim.slice(0, 24)}`);
+      } else {
+        setVoiceInputHint('正在听写，请说话...');
+      }
     };
     recognition.onend = () => {
       setIsListening(false);
+      setVoiceInterimText('');
+
+      if (!shouldKeepListeningRef.current || !myTurnRef.current) {
+        setVoiceInputHint('点击按钮可将语音转换为文字');
+        return;
+      }
+
+      window.setTimeout(() => {
+        if (!shouldKeepListeningRef.current || !myTurnRef.current) {
+          return;
+        }
+
+        try {
+          recognition.start();
+        } catch {
+          setVoiceInputHint('语音输入重启失败，请手动重试');
+          setVoiceInputError('语音输入重启失败，请手动重试');
+          shouldKeepListeningRef.current = false;
+          setIsListening(false);
+        }
+      }, 180);
     };
-    recognition.onerror = () => {
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       setIsListening(false);
+      setVoiceInterimText('');
+
+      const errorMessage = mapRecognitionError(event.error);
+      setVoiceInputHint(errorMessage);
+
+      if (event.error !== 'no-speech') {
+        setVoiceInputError(errorMessage);
+      }
+
+      if (event.error !== 'no-speech') {
+        shouldKeepListeningRef.current = false;
+      }
     };
 
     recognitionRef.current = recognition;
     setVoiceSupported(true);
 
     return () => {
+      shouldKeepListeningRef.current = false;
+      recognition.onstart = null;
       recognition.onresult = null;
       recognition.onend = null;
       recognition.onerror = null;
       recognition.abort();
       recognitionRef.current = null;
+      setVoiceInterimText('');
       setIsListening(false);
     };
-  }, []);
+  }, [appendSpeechTranscript, mapRecognitionError]);
 
   useEffect(() => {
     const me = roomState?.players.find((player) => player.seat === roomState.mySeat);
     const myTurnNow =
       roomState?.phase === 'SPEAKING' && roomState.currentSpeaker === roomState.mySeat && Boolean(me?.isAlive);
 
-    if (!myTurnNow && isListening) {
+    myTurnRef.current = Boolean(myTurnNow);
+
+    if (!myTurnNow && (isListening || shouldKeepListeningRef.current)) {
+      shouldKeepListeningRef.current = false;
       recognitionRef.current?.stop();
+      setVoiceInterimText('');
+      setVoiceInputHint('点击按钮可将语音转换为文字');
       setIsListening(false);
     }
   }, [roomState, isListening]);
@@ -545,16 +648,25 @@ function RoomPage() {
       return;
     }
 
-    if (isListening) {
+    if (isListening || shouldKeepListeningRef.current) {
+      shouldKeepListeningRef.current = false;
       recognitionRef.current.stop();
+      setVoiceInterimText('');
+      setVoiceInputHint('点击按钮可将语音转换为文字');
       setIsListening(false);
       return;
     }
 
     try {
+      shouldKeepListeningRef.current = true;
+      setVoiceInputError(null);
+      setVoiceInterimText('');
       recognitionRef.current.start();
-      setIsListening(true);
+      setVoiceInputHint('正在听写，请说话...');
     } catch {
+      shouldKeepListeningRef.current = false;
+      setVoiceInputError('语音输入启动失败，请重试');
+      setVoiceInputHint('语音输入启动失败，请重试');
       setIsListening(false);
     }
   };
@@ -620,7 +732,7 @@ function RoomPage() {
             {voteResult.eliminatedSeat
               ? `淘汰座位 ${voteResult.eliminatedSeat}`
               : voteResult.tie
-                ? '平票，进入加赛投票'
+                ? '平票，进入下一轮发言'
                 : '暂无淘汰'}
           </p>
         </div>
@@ -772,8 +884,11 @@ function RoomPage() {
               if (event.key === 'Enter' && speechInput.trim()) {
                 speak(speechInput);
                 setSpeechInput('');
-                if (isListening) {
+                if (isListening || shouldKeepListeningRef.current) {
+                  shouldKeepListeningRef.current = false;
                   recognitionRef.current?.stop();
+                  setVoiceInterimText('');
+                  setVoiceInputHint('点击按钮可将语音转换为文字');
                 }
               }
             }}
@@ -788,7 +903,13 @@ function RoomPage() {
               {voiceSupported ? (isListening ? '停止语音输入' : '语音输入') : '当前浏览器不支持语音输入'}
             </button>
             {voiceSupported && (
-              <div className="voice-hint">{isListening ? '正在听写，请说话...' : '点击按钮可将语音转换为文字'}</div>
+              <div className="voice-hint">
+                {voiceInputError
+                  ? voiceInputError
+                  : voiceInterimText
+                    ? `实时识别：${voiceInterimText.slice(0, 24)}`
+                    : voiceInputHint}
+              </div>
             )}
           </div>
           <button
@@ -797,8 +918,11 @@ function RoomPage() {
             onClick={() => {
               speak(speechInput);
               setSpeechInput('');
-              if (isListening) {
+              if (isListening || shouldKeepListeningRef.current) {
+                shouldKeepListeningRef.current = false;
                 recognitionRef.current?.stop();
+                setVoiceInterimText('');
+                setVoiceInputHint('点击按钮可将语音转换为文字');
               }
             }}
           >

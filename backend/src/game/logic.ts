@@ -275,6 +275,7 @@ export function resetRoomForRematch(room: RoomState): void {
   room.winner = undefined;
   room.civilianWord = undefined;
   room.undercoverWord = undefined;
+  room.aiMemoryBySeat = undefined;
 
   touch(room);
 }
