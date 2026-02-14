@@ -19,6 +19,8 @@ interface CompletionResponse {
   }>;
 }
 
+type PsychologicalMode = 'camouflage' | 'balanced' | 'assertive';
+
 class Semaphore {
   private readonly max: number;
   private active = 0;
@@ -101,8 +103,8 @@ class DeepSeekAdapter implements ModelAdapter {
         body: JSON.stringify({
           model: this.model,
           messages,
-          temperature: 0.4,
-          max_tokens: 120
+          temperature: 0.42,
+          max_tokens: 140
         }),
         signal: controller.signal
       });
@@ -200,28 +202,40 @@ function validateVoteJson(input: unknown, aliveSeats: SeatNumber[]): VoteTarget 
   return null;
 }
 
-const precisionSpeechPool = [
-  '我给侧面细节，先看动作线。',
-  '我偏向用途线索，不给直名。',
-  '我先给场景，不给核心词。',
-  '先看使用方式，再听你们补。',
-  '我给结构线索，留一手。'
+const camouflageSpeechPool = [
+  '我先贴公共线索，别急着锁人。',
+  '我这轮给外层信息，核心先藏。',
+  '我先跟大方向，细节慢慢补。',
+  '我先给模糊画像，听完再定。',
+  '我先走保守线，避免误伤队友。'
 ];
 
-const chaosSpeechPool = [
-  '我先反向发言，别被直觉带跑。',
-  '这句故意留白，先看谁着急。',
-  '我先绕一圈，让你们先站队。',
-  '我先抛烟雾，不急着落点。',
-  '我先走偏锋，看谁先对号入座。'
+const balancedSpeechPool = [
+  '我给一个日常场景，别对号。',
+  '我先说用途边缘，不给词名。',
+  '我给一半线索，留一半观察。',
+  '先听全场再收口，我这句偏稳。',
+  '我先抛侧写，后面再加细节。'
 ];
 
-const sharedSpeechPool = [
-  '我给生活画面，不给答案词。',
-  '我先放半句，让信息继续流动。',
-  '我先贴边说，核心先不交。',
-  '这轮先稳，别急着锁人。',
-  '先给你们一层外壳线索。'
+const assertiveSpeechPool = [
+  '我给可验证线索，大家对比看。',
+  '这词偏生活功能，不是摆设类。',
+  '我这句稍具体，方便后面排人。',
+  '我给关键使用感，别只看字面。',
+  '我先立判断，再看谁反应怪。'
+];
+
+const precisionStrategySpeechPool = [
+  '我重看模糊描述位，先记笔记。',
+  '细节回避太多的人我会盯住。',
+  '我更看重行为细节而非口号。'
+];
+
+const chaosStrategySpeechPool = [
+  '细节太满未必真，我先反着看。',
+  '越像标准答案我越不放心。',
+  '我先拆掉直觉，再看谁慌。'
 ];
 
 const SEMANTIC_REWRITE_RULES: Array<{ pattern: RegExp; replacement: string }> = [
@@ -235,7 +249,9 @@ const SEMANTIC_REWRITE_RULES: Array<{ pattern: RegExp; replacement: string }> = 
   { pattern: /(观察|留意|看看|瞅瞅)/g, replacement: '观察' },
   { pattern: /(细节|特征|特点)/g, replacement: '细节' },
   { pattern: /(留白|藏着|保留|收着)/g, replacement: '留白' },
-  { pattern: /(绕着说|绕一圈|拐着说)/g, replacement: '绕说' }
+  { pattern: /(绕着说|绕一圈|拐着说)/g, replacement: '绕说' },
+  { pattern: /(锁人|锁定|点名)/g, replacement: '锁定' },
+  { pattern: /(外层|外壳|边缘)/g, replacement: '外层' }
 ];
 
 const SEMANTIC_STOP_WORDS = [
@@ -252,6 +268,16 @@ const SEMANTIC_STOP_WORDS = [
   '然后',
   '现在'
 ];
+
+function clamp(value: number, min: number, max: number): number {
+  if (value < min) {
+    return min;
+  }
+  if (value > max) {
+    return max;
+  }
+  return value;
+}
 
 function normalizeSpeechText(value: string): string {
   return value.trim().replace(/\s+/g, ' ').slice(0, 30);
@@ -365,10 +391,26 @@ function formatSuspicionSummary(context: AIContext): string {
     .map(([seat, score]) => ({ seat: Number(seat), score: Number(score) }))
     .filter((item) => Number.isFinite(item.seat) && Number.isFinite(item.score) && item.seat !== context.mySeat)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 4)
+    .slice(0, 5)
     .map((item) => `${item.seat}:${item.score}`);
 
   return entries.length > 0 ? entries.join(', ') : '暂无明确高疑位';
+}
+
+function formatRoleBelief(context: AIContext): string {
+  const undercover = clamp(context.memory?.selfRoleBelief.undercover ?? 0.5, 0, 1);
+  const civilian = clamp(context.memory?.selfRoleBelief.civilian ?? 1 - undercover, 0, 1);
+  return `平民${Math.round(civilian * 100)}%, 卧底${Math.round(undercover * 100)}%`;
+}
+
+function modeLabel(mode: PsychologicalMode): string {
+  if (mode === 'camouflage') {
+    return '伪装保命';
+  }
+  if (mode === 'assertive') {
+    return '主动排查';
+  }
+  return '观望试探';
 }
 
 export class AIClient {
@@ -393,7 +435,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”AI玩家。必须遵守：1) 你不知道自己是平民还是卧底；2) 只能基于自己的私有记忆推理；3) 禁止重复任何历史发言，也禁止同义改写；4) 发言<=30字，贴合自己词语，带轻微误导但不直给。只输出 JSON，不要解释。JSON schema: {"speech":"string<=30字"}。'
+              '你是“谁是卧底”AI玩家。必须遵守：1) 你和其他人身份都未知；2) 每次发言先估计自己是平民还是卧底；3) 若你更像卧底或票压高，优先伪装避免暴露；4) 若你更像平民，可给轻量可验证线索推进排查；5) 禁止复用历史原句和同义句。只输出 JSON，不要解释。JSON schema: {"speech":"string<=30字"}。'
           },
           {
             role: 'user',
@@ -427,7 +469,7 @@ export class AIClient {
           {
             role: 'system',
             content:
-              '你是“谁是卧底”AI玩家。你不知道自己是平民还是卧底。投票时必须坚持你的私有记忆与对立推理立场，不要与其他AI保持一致。只输出 JSON，不要解释或 markdown。JSON schema: {"vote": number}，其中0为弃权，其他必须是存活座位号。'
+              '你是“谁是卧底”AI玩家。你不知道自己和他人的身份。投票前先给出自己的身份猜测，再按游戏心理行动：若怀疑自己是卧底或票压高，优先融入多数避免暴露；若更像平民，优先投给你独立推理出的高疑位。只输出 JSON，不要解释。JSON schema: {"vote": number}，其中0为弃权，其他必须是存活座位号。'
           },
           {
             role: 'user',
@@ -464,7 +506,8 @@ export class AIClient {
     const speechLog = context.speeches
       .map((item) => `第${item.round}轮 座位${item.seat}: ${item.text}`)
       .join('\n');
-    const notes = context.memory?.notes.slice(-6).join(' | ') ?? '暂无';
+    const notes = context.memory?.notes.slice(-8).join(' | ') ?? '暂无';
+    const mode = this.pickPsychologicalMode(context);
 
     return [
       `你是座位${context.mySeat}`,
@@ -474,10 +517,15 @@ export class AIClient {
       `存活座位: ${context.aliveSeats.join(', ')}`,
       context.memory ? `你的推理立场: ${context.memory.oppositionLabel}` : '你的推理立场: 默认中性',
       context.memory?.rivalSeat ? `对立参考座位: ${context.memory.rivalSeat}` : '对立参考座位: 无',
+      `你的身份猜测: ${formatRoleBelief(context)}`,
+      `当前心理模式: ${modeLabel(mode)}`,
+      `伪装强度: ${Math.round((context.memory?.camouflageScore ?? 0.4) * 100)}%`,
+      `上一轮票压: ${context.memory?.receivedVotesLastRound ?? 0}`,
+      context.memory?.consensusTargetSeat ? `场上共识位: 座${context.memory.consensusTargetSeat}` : '场上共识位: 暂无',
       `你的私有记忆: ${notes}`,
       `你的私有嫌疑分布: ${formatSuspicionSummary(context)}`,
       speechLog ? `公开发言记录:\n${speechLog}` : '暂无公开发言',
-      '输出一句30字内的新发言：必须与历史发言和同义句都不同。'
+      '输出一句30字内新发言：不要复述，也不要同义改写。'
     ].join('\n');
   }
 
@@ -485,7 +533,8 @@ export class AIClient {
     const speechLog = context.speeches
       .map((item) => `第${item.round}轮 座位${item.seat}: ${item.text}`)
       .join('\n');
-    const notes = context.memory?.notes.slice(-6).join(' | ') ?? '暂无';
+    const notes = context.memory?.notes.slice(-8).join(' | ') ?? '暂无';
+    const mode = this.pickPsychologicalMode(context);
 
     return [
       `你是座位${context.mySeat}`,
@@ -495,11 +544,16 @@ export class AIClient {
       `存活座位: ${context.aliveSeats.join(', ')}`,
       context.memory ? `你的推理立场: ${context.memory.oppositionLabel}` : '你的推理立场: 默认中性',
       context.memory?.rivalSeat ? `对立参考座位: ${context.memory.rivalSeat}` : '对立参考座位: 无',
+      `你的身份猜测: ${formatRoleBelief(context)}`,
+      `当前心理模式: ${modeLabel(mode)}`,
+      `伪装强度: ${Math.round((context.memory?.camouflageScore ?? 0.4) * 100)}%`,
+      `上一轮票压: ${context.memory?.receivedVotesLastRound ?? 0}`,
+      context.memory?.consensusTargetSeat ? `场上共识位: 座${context.memory.consensusTargetSeat}` : '场上共识位: 暂无',
       `你的私有记忆: ${notes}`,
       `你的私有嫌疑分布: ${formatSuspicionSummary(context)}`,
       context.memory?.lastVote !== undefined ? `你上一轮投票: ${context.memory.lastVote}` : '你上一轮投票: 无',
       speechLog ? `公开发言记录:\n${speechLog}` : '暂无公开发言',
-      '请投给你最怀疑的存活玩家，必要时可输出0弃权。'
+      '请输出0或一个存活座位号。'
     ].join('\n');
   }
 
@@ -551,21 +605,29 @@ export class AIClient {
   }
 
   private buildSpeechCandidates(context: AIContext): string[] {
-    const strategyPool = context.memory?.strategy === 'chaos' ? chaosSpeechPool : precisionSpeechPool;
+    const mode = this.pickPsychologicalMode(context);
+    const modePool =
+      mode === 'camouflage' ? camouflageSpeechPool : mode === 'assertive' ? assertiveSpeechPool : balancedSpeechPool;
+    const strategyPool =
+      context.memory?.strategy === 'chaos' ? chaosStrategySpeechPool : precisionStrategySpeechPool;
     const suspectedSeat = this.pickMostSuspectedSeat(context);
+    const consensusSeat = this.getConsensusSeat(context);
 
     const dynamicPool = [
-      `第${context.round}轮我给侧线，先听全场。`,
-      `第${context.round}轮我给用途线，不报词名。`,
-      `我先做反向描述，重点看反应。`,
-      `我给一层外壳线索，内核暂留。`,
-      suspectedSeat ? `我先盯座${suspectedSeat}的反应，再补。` : `我先不落座位，继续观察。`,
+      `第${context.round}轮我先给侧线，后续再收。`,
+      mode === 'camouflage'
+        ? `我先跟公共线，不急着出尖锐点。`
+        : mode === 'assertive'
+          ? `我先给判断线，后面可验证。`
+          : `我先放半句，继续看反应。`,
+      suspectedSeat ? `我先观察座${suspectedSeat}这轮反应。` : `我先不落点，继续收信息。`,
+      consensusSeat ? `场上先看座${consensusSeat}，我先跟一轮。` : `场上还没共识，我先稳住节奏。`,
       context.memory?.rivalSeat
-        ? `我先和座${context.memory.rivalSeat}走反向逻辑。`
-        : `我先用独立记忆，不跟票。`
+        ? `我这轮和座${context.memory.rivalSeat}走反向逻辑。`
+        : `我坚持独立记忆，不机械跟票。`
     ];
 
-    const all = [...strategyPool, ...sharedSpeechPool, ...dynamicPool]
+    const all = [...modePool, ...strategyPool, ...dynamicPool]
       .map((item) => normalizeSpeechText(item))
       .filter((item) => item.length > 0)
       .map((item) => item.slice(0, 30));
@@ -579,11 +641,25 @@ export class AIClient {
   }
 
   private buildEmergencySpeech(context: AIContext, usedCorpus: string[] = []): string {
-    const seeds = [
-      `第${context.round}轮${context.mySeat}号走侧写线`,
-      `第${context.round}轮${context.mySeat}号给反向线索`,
-      `第${context.round}轮${context.mySeat}号先留白`
-    ];
+    const mode = this.pickPsychologicalMode(context);
+    const seeds =
+      mode === 'camouflage'
+        ? [
+            `第${context.round}轮${context.mySeat}号先贴共识线`,
+            `第${context.round}轮${context.mySeat}号继续留白`,
+            `第${context.round}轮${context.mySeat}号稳住节奏`
+          ]
+        : mode === 'assertive'
+          ? [
+              `第${context.round}轮${context.mySeat}号给验证线`,
+              `第${context.round}轮${context.mySeat}号先点特征`,
+              `第${context.round}轮${context.mySeat}号看行为`
+            ]
+          : [
+              `第${context.round}轮${context.mySeat}号先侧写`,
+              `第${context.round}轮${context.mySeat}号先观察`,
+              `第${context.round}轮${context.mySeat}号保守发言`
+            ];
 
     for (const seed of seeds) {
       if (this.isSpeechUnique(seed, usedCorpus)) {
@@ -603,6 +679,28 @@ export class AIClient {
     return entries[0]?.seat;
   }
 
+  private getConsensusSeat(context: AIContext): SeatNumber | undefined {
+    const seat = context.memory?.consensusTargetSeat;
+    if (seat && context.aliveSeats.includes(seat) && seat !== context.mySeat) {
+      return seat;
+    }
+    return undefined;
+  }
+
+  private pickPsychologicalMode(context: AIContext): PsychologicalMode {
+    const undercoverBelief = context.memory?.selfRoleBelief.undercover ?? 0.5;
+    const pressure = context.memory?.receivedVotesLastRound ?? 0;
+    const camouflageScore = context.memory?.camouflageScore ?? 0.4;
+
+    if (undercoverBelief >= 0.6 || pressure >= 2 || camouflageScore >= 0.62) {
+      return 'camouflage';
+    }
+    if (undercoverBelief <= 0.4 && pressure === 0 && camouflageScore <= 0.46) {
+      return 'assertive';
+    }
+    return 'balanced';
+  }
+
   private fallbackVote(context: AIContext): VoteTarget {
     const options = context.aliveSeats.filter((seat) => seat !== context.mySeat);
     if (options.length === 0) {
@@ -620,18 +718,41 @@ export class AIClient {
     });
 
     const topCandidate = sortedBySuspicion[0];
-    if ((suspicion[topCandidate] ?? 0) >= 1) {
+    const topScore = suspicion[topCandidate] ?? 0;
+    const consensusSeat = this.getConsensusSeat(context);
+    const mode = this.pickPsychologicalMode(context);
+
+    if (mode === 'camouflage') {
+      if (consensusSeat) {
+        return consensusSeat;
+      }
+      if (topScore >= 1) {
+        return topCandidate;
+      }
+
+      if (Math.random() < 0.08) {
+        return 0;
+      }
+      return options[(context.round + context.mySeat) % options.length];
+    }
+
+    if (mode === 'assertive') {
+      if (topScore >= 0) {
+        return topCandidate;
+      }
+      return options[0];
+    }
+
+    if (topScore >= 2) {
       return topCandidate;
     }
-
-    if (Math.random() < 0.15) {
+    if (consensusSeat && Math.random() < 0.7) {
+      return consensusSeat;
+    }
+    if (Math.random() < 0.16) {
       return 0;
     }
-
-    if (context.memory?.strategy === 'chaos') {
-      return options[options.length - 1];
-    }
-    return options[0];
+    return options[(context.round * 7 + context.mySeat) % options.length];
   }
 
   private logDisabledOnce(): void {

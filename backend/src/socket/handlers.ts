@@ -2,7 +2,13 @@ import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { Server, Socket } from 'socket.io';
 import { aiClient } from '../ai/client';
-import { buildAIMemorySnapshot, refreshAIMemoryForRoom, rememberAISpeech, rememberAIVote } from '../ai/memory';
+import {
+  buildAIMemorySnapshot,
+  refreshAIMemoryForRoom,
+  rememberAISpeech,
+  rememberAIVote,
+  rememberRoundTally
+} from '../ai/memory';
 import { config } from '../config';
 import * as Game from '../game/logic';
 import { logger } from '../logger';
@@ -370,6 +376,7 @@ async function resolveVoting(io: Server, room: RoomState): Promise<void> {
   clearRoomTimer(room.id);
 
   const { tally, topSeats } = Game.tallyVotes(room);
+  rememberRoundTally(room, tally);
 
   if (topSeats.length > 1) {
     const tiePayload: VoteResultPayload = {

@@ -10,7 +10,7 @@ echo "[INFO] 开始部署"
 
 if [[ -d .git ]]; then
   echo "[INFO] 检测到 git 仓库，尝试拉取最新代码"
-  git pull --rebase || echo "[WARN] git pull 失败，请手动处理冲突后重试"
+  git pull --rebase --autostash || echo "[WARN] git pull 失败，请手动处理冲突后重试"
 fi
 
 if [[ -d .git ]]; then

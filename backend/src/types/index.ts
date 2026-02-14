@@ -8,6 +8,11 @@ export type Winner = 'civilian' | 'undercover';
 
 export type AIStrategy = 'precision' | 'chaos';
 
+export interface RoleBelief {
+  civilian: number;
+  undercover: number;
+}
+
 export type GamePhase =
   | 'LOBBY'
   | 'DEAL'
@@ -42,6 +47,10 @@ export interface AIPrivateMemory {
   notes: string[];
   usedSpeeches: string[];
   suspicionBySeat: Partial<Record<SeatNumber, number>>;
+  selfRoleBelief: RoleBelief;
+  camouflageScore: number;
+  receivedVotesLastRound: number;
+  consensusTargetSeat?: SeatNumber;
   lastVote?: VoteTarget;
   reviewedSpeechCount: number;
 }
@@ -82,6 +91,10 @@ export interface AIMemorySnapshot {
   notes: string[];
   usedSpeeches: string[];
   suspicionBySeat: Partial<Record<SeatNumber, number>>;
+  selfRoleBelief: RoleBelief;
+  camouflageScore: number;
+  receivedVotesLastRound: number;
+  consensusTargetSeat?: SeatNumber;
   lastVote?: VoteTarget;
 }
 
