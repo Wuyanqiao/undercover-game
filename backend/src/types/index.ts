@@ -71,6 +71,7 @@ export interface RoomState {
   currentSpeaker?: SeatNumber;
   civilianWord?: string;
   undercoverWord?: string;
+  wordHint?: string;
   lastWordPairKey?: string;
   deadlineTs?: number;
   tieBreak: {
@@ -118,6 +119,7 @@ export interface VisibleState {
   speeches: SpeechRecord[];
   mySeat?: SeatNumber;
   myWord?: string;
+  wordHint?: string;
   isHost: boolean;
   deadlineTs?: number;
   tieBreakCandidates: SeatNumber[];
@@ -143,6 +145,7 @@ export interface GameEndPayload {
     words: {
       civilian: string;
       undercover: string;
+      hint?: string;
     };
   };
 }

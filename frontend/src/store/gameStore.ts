@@ -31,6 +31,7 @@ export interface RoomState {
   speeches: SpeechRecord[];
   mySeat?: number;
   myWord?: string;
+  wordHint?: string;
   isHost: boolean;
   deadlineTs?: number;
   tieBreakCandidates: number[];
@@ -56,6 +57,7 @@ export interface GameEndState {
     words: {
       civilian: string;
       undercover: string;
+      hint?: string;
     };
   };
 }

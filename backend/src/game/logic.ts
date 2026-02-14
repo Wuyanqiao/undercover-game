@@ -236,6 +236,7 @@ export function dealRoles(room: RoomState, providedWordPair?: PickedWordPair): v
   room.lastWordPairKey = picked.key;
   room.civilianWord = picked.pair.civilian;
   room.undercoverWord = picked.pair.undercover;
+  room.wordHint = picked.pair.hint;
 
   const shuffled = [...room.players];
   for (let index = shuffled.length - 1; index > 0; index -= 1) {
@@ -295,6 +296,7 @@ export function resetRoomForRematch(room: RoomState): void {
   room.winner = undefined;
   room.civilianWord = undefined;
   room.undercoverWord = undefined;
+  room.wordHint = undefined;
   room.aiMemoryBySeat = undefined;
 
   touch(room);
@@ -484,6 +486,7 @@ export function buildVisibleState(room: RoomState, viewerSeat?: SeatNumber): Vis
     speeches: room.speeches,
     mySeat: me?.seat,
     myWord: me?.word,
+    wordHint: room.wordHint,
     isHost: me?.seat === room.hostSeat,
     deadlineTs: room.deadlineTs,
     tieBreakCandidates: room.tieBreak.active ? room.tieBreak.candidates : []
@@ -500,6 +503,7 @@ export function buildReveal(room: RoomState): {
   words: {
     civilian: string;
     undercover: string;
+    hint?: string;
   };
 } {
   return {
@@ -513,7 +517,8 @@ export function buildReveal(room: RoomState): {
       })),
     words: {
       civilian: room.civilianWord ?? '',
-      undercover: room.undercoverWord ?? ''
+      undercover: room.undercoverWord ?? '',
+      hint: room.wordHint
     }
   };
 }

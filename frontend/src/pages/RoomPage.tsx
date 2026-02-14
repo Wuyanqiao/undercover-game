@@ -721,6 +721,7 @@ function RoomPage() {
             <div className="role-label">你的词</div>
             <div className="word-value">{roomState.myWord}</div>
           </div>
+          {roomState.wordHint && <div className="meta-line">本局提示：{roomState.wordHint}</div>}
           <div className="meta-line">身份未知，请根据发言判断自己和他人的身份。</div>
         </div>
       )}
@@ -761,6 +762,7 @@ function RoomPage() {
                 <div className="word">{gameEnd.reveal.words.undercover}</div>
               </div>
             </div>
+            {gameEnd.reveal.words.hint && <div className="meta-line">本局提示：{gameEnd.reveal.words.hint}</div>}
           </div>
 
           <div className="end-actions">
