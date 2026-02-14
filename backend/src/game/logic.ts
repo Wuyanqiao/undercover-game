@@ -218,6 +218,19 @@ export function canStartGame(room: RoomState): { ok: boolean; reason?: string } 
   return { ok: true };
 }
 
+export function getUndercoverCountForPlayerCount(playerCount: number): number {
+  if (playerCount >= 11) {
+    return 4;
+  }
+  if (playerCount >= 9) {
+    return 3;
+  }
+  if (playerCount >= 6) {
+    return 2;
+  }
+  return 1;
+}
+
 export function dealRoles(room: RoomState, providedWordPair?: PickedWordPair): void {
   const picked = providedWordPair ?? getRandomWordPair(room.lastWordPairKey);
   room.lastWordPairKey = picked.key;
@@ -225,12 +238,19 @@ export function dealRoles(room: RoomState, providedWordPair?: PickedWordPair): v
   room.undercoverWord = picked.pair.undercover;
 
   const shuffled = [...room.players];
-  const undercoverIndex = Math.floor(Math.random() * shuffled.length);
-  const undercoverSeat = shuffled[undercoverIndex].seat;
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const temp = shuffled[index];
+    shuffled[index] = shuffled[swapIndex];
+    shuffled[swapIndex] = temp;
+  }
+
+  const undercoverCount = Math.min(getUndercoverCountForPlayerCount(room.players.length), room.players.length - 1);
+  const undercoverSeats = new Set(shuffled.slice(0, undercoverCount).map((player) => player.seat));
 
   for (const player of room.players) {
     player.isAlive = true;
-    if (player.seat === undercoverSeat) {
+    if (undercoverSeats.has(player.seat)) {
       player.role = 'undercover';
       player.word = picked.pair.undercover;
     } else {
